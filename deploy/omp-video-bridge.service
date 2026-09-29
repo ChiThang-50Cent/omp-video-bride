@@ -1,0 +1,21 @@
+[Unit]
+Description=omp video bridge v2
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=simple
+User=thangnc
+WorkingDirectory=/home/thangnc/general/omp-video-bridge
+Environment=HOME=/home/thangnc
+Environment=USER=thangnc
+Environment=PATH=/home/thangnc/.nvm/versions/node/v22.20.0/bin:/home/thangnc/.local/bin:/home/thangnc/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=BRIDGE_CONFIG=/home/thangnc/.config/omp-video-bridge/config.json
+ExecStart=/home/thangnc/.nvm/versions/node/v22.20.0/bin/node --disable-warning=ExperimentalWarning src/main.ts
+Restart=always
+RestartSec=5
+KillMode=process
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
