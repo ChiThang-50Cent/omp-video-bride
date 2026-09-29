@@ -112,7 +112,7 @@ Payload: `{eventId, type, at, job:{id,kind,state}, project:{id,name}, scene:{id,
 ## 8. Runner
 - Concurrency is configurable (default 1). FIFO, with priority for cheap job kinds (stitch, render, captions revise).
 - Spawns `omp -p --mode json --session-dir <workdir>/sessions --config <overlay> --cwd <workdir> [--continue] --max-time <m>` in its own process group. Cancel sends SIGTERM to the group, then SIGKILL after 10s.
-- Streams stdout into the event log (message_end → usage and cost), and extracts the final JSON through `pipeline.parseResult`.
+- Cost: the orchestrator's `message_end` usage is only part of the bill; frame workers run as subagents with their own session files under `sessions/`. The runner therefore sums `usage.cost.total` over every `*.jsonl` in the sessions dir (a v1 audit showed workers dominate token count). Streams stdout into the event log and extracts the final JSON through `pipeline.parseResult`.
 - On start, `running` jobs → `interrupted` → resume. Queued jobs keep their order.
 
 ## 9. Code layout
@@ -123,13 +123,13 @@ src/ports/       Store, Runner, Pipeline, Notifier, Blob
 src/adapters/    store-sqlite, runner-omp, notifier-webhook, blob-fs, stitch-ffmpeg
 src/pipelines/hyperframes-explainer/  spec, catalog, prompts/*.md, result, revision, skills/ (omp-video-pipeline, worker-rules, scripts/)
 src/http/        routes (thin), zod→openapi, errors, auth
-src/config.ts    one TOML file (paths, host/port, models, limits, webhook) validated with zod
+src/config.ts    one JSON file (BRIDGE_CONFIG) plus env overrides, validated with zod; every path defaults from $HOME
 test/unit · test/integration (fake-omp binary emitting scripted JSON, tmp dirs, :memory: sqlite)
 deploy/          systemd unit, install.sh (install unit, sync the Hermes skill, register the Hermes webhook)
 docs/            SPEC.md, API (generated), CHANGELOG.md
 hermes-skill/omp-video/   written against /v1 + catalog; no duplicated option lists
 ```
-Stack: TypeScript on Node 22 (tsx for dev, tsc build), zod, better-sqlite3, node:http with a small router (no framework), vitest.
+Stack: TypeScript on Node 22 (tsx for dev, tsc build), zod, built-in `node:sqlite` (no native build; replaces better-sqlite3), node:http with a small router (no framework), vitest.
 
 ## 10. Skills
 | Layer | Location | Rule |
