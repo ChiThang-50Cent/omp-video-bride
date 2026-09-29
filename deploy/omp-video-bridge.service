@@ -14,7 +14,6 @@ Environment=BRIDGE_CONFIG=/home/thangnc/.config/omp-video-bridge/config.json
 ExecStart=/home/thangnc/.nvm/versions/node/v22.20.0/bin/node --disable-warning=ExperimentalWarning src/main.ts
 Restart=always
 RestartSec=5
-KillMode=process
 TimeoutStopSec=20
 
 [Install]
