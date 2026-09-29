@@ -2,7 +2,8 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { transition, type Job, type JobEvent, type JobState } from "../../core/job.ts";
-import type { Store, StoredEvent } from "../../ports/store.ts";
+import type { Asset, Project, Scene, Version } from "../../core/entities.ts";
+import type { OutboxRow, Store, StoredEvent } from "../../ports/store.ts";
 import { MIGRATIONS } from "./migrations.ts";
 
 export class SqliteStore implements Store {
@@ -59,11 +60,12 @@ export class SqliteStore implements Store {
     return row && (JSON.parse(row.data) as Job);
   }
 
-  listJobs(filter: { state?: JobState; kind?: string; limit?: number } = {}): Job[] {
+  listJobs(filter: { state?: JobState; kind?: string; projectId?: string; limit?: number } = {}): Job[] {
     const where: string[] = [];
     const args: (string | number)[] = [];
     if (filter.state) { where.push("state = ?"); args.push(filter.state); }
     if (filter.kind) { where.push("kind = ?"); args.push(filter.kind); }
+    if (filter.projectId) { where.push("json_extract(data, '$.refs.projectId') = ?"); args.push(filter.projectId); }
     const sql = `SELECT data FROM jobs ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY created_at, id LIMIT ?`;
     const rows = this.db.prepare(sql).all(...args, filter.limit ?? 500) as { data: string }[];
     return rows.map(r => JSON.parse(r.data) as Job);
@@ -90,6 +92,66 @@ export class SqliteStore implements Store {
       id: number; job_id: string; type: string; at: string; data: string;
     }[];
     return rows.map(r => ({ id: r.id, jobId: r.job_id, type: r.type, at: r.at, data: JSON.parse(r.data) }));
+  }
+
+  // ---- document tables: one JSON blob per entity, indexed by its parent ----
+  private put(table: string, cols: Record<string, string | number>, data: unknown): void {
+    const names = [...Object.keys(cols), "data"];
+    const sql = `INSERT INTO ${table} (${names.join(", ")}) VALUES (${names.map(() => "?").join(", ")}) ` +
+      `ON CONFLICT(id) DO UPDATE SET ${names.filter(n => n !== "id").map(n => `${n} = excluded.${n}`).join(", ")}`;
+    this.db.prepare(sql).run(...Object.values(cols), JSON.stringify(data));
+  }
+  private one<T>(table: string, id: string): T | undefined {
+    const row = this.db.prepare(`SELECT data FROM ${table} WHERE id = ?`).get(id) as { data: string } | undefined;
+    return row && (JSON.parse(row.data) as T);
+  }
+  private many<T>(sql: string, ...args: (string | number)[]): T[] {
+    return (this.db.prepare(sql).all(...args) as { data: string }[]).map(r => JSON.parse(r.data) as T);
+  }
+
+  putProject(p: Project): void { this.put("projects", { id: p.id, created_at: p.createdAt }, p); }
+  getProject(id: string): Project | undefined { return this.one("projects", id); }
+  listProjects(): Project[] { return this.many("SELECT data FROM projects ORDER BY created_at, id"); }
+  deleteProject(id: string): void {
+    this.tx(() => {
+      for (const s of this.listScenes(id)) this.deleteScene(s.id);
+      this.db.prepare("DELETE FROM assets WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM projects WHERE id = ?").run(id);
+    });
+  }
+
+  putScene(s: Scene): void { this.put("scenes", { id: s.id, project_id: s.projectId, n: s.n }, s); }
+  getScene(id: string): Scene | undefined { return this.one("scenes", id); }
+  listScenes(projectId: string): Scene[] { return this.many("SELECT data FROM scenes WHERE project_id = ? ORDER BY n", projectId); }
+  deleteScene(id: string): void {
+    this.db.prepare("DELETE FROM versions WHERE scene_id = ?").run(id);
+    this.db.prepare("DELETE FROM scenes WHERE id = ?").run(id);
+  }
+
+  putVersion(v: Version): void { this.put("versions", { id: v.id, scene_id: v.sceneId, number: v.number }, v); }
+  getVersion(id: string): Version | undefined { return this.one("versions", id); }
+  listVersions(sceneId: string): Version[] { return this.many("SELECT data FROM versions WHERE scene_id = ? ORDER BY number", sceneId); }
+
+  putAsset(a: Asset): void { this.put("assets", { id: a.id, project_id: a.projectId }, a); }
+  getAsset(id: string): Asset | undefined { return this.one("assets", id); }
+  listAssets(projectId: string): Asset[] { return this.many("SELECT data FROM assets WHERE project_id = ? ORDER BY id", projectId); }
+  deleteAsset(id: string): void { this.db.prepare("DELETE FROM assets WHERE id = ?").run(id); }
+
+  enqueueOutbox(eventId: string, payload: string, now: string): void {
+    this.db.prepare("INSERT OR IGNORE INTO outbox (event_id, payload, next_at) VALUES (?, ?, ?)").run(eventId, payload, now);
+  }
+  dueOutbox(now: string, limit: number): OutboxRow[] {
+    const rows = this.db.prepare("SELECT id, event_id, payload, attempts, next_at FROM outbox WHERE state = 'pending' AND next_at <= ? ORDER BY id LIMIT ?").all(now, limit) as
+      { id: number; event_id: string; payload: string; attempts: number; next_at: string }[];
+    return rows.map(r => ({ id: r.id, eventId: r.event_id, payload: r.payload, attempts: r.attempts, nextAt: r.next_at }));
+  }
+  outboxDelivered(id: number): void { this.db.prepare("UPDATE outbox SET state = 'delivered' WHERE id = ?").run(id); }
+  outboxRetry(id: number, attempts: number, nextAt: string, dead: boolean): void {
+    this.db.prepare("UPDATE outbox SET attempts = ?, next_at = ?, state = ? WHERE id = ?").run(attempts, nextAt, dead ? "dead" : "pending", id);
+  }
+  outboxCounts(): { pending: number; dead: number } {
+    const r = this.db.prepare("SELECT SUM(state = 'pending') AS pending, SUM(state = 'dead') AS dead FROM outbox").get() as { pending: number | null; dead: number | null };
+    return { pending: r.pending ?? 0, dead: r.dead ?? 0 };
   }
 
   close(): void {

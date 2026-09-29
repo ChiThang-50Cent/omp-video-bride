@@ -13,7 +13,9 @@ import { dirname, join } from "node:path";
 const argv = process.argv.slice(2);
 const flag = name => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
 const cwd = flag("--cwd") ?? process.cwd();
-const scenario = JSON.parse(readFileSync(process.env.FAKE_OMP_SCENARIO, "utf8"));
+// `{{cwd}}` in any string is replaced by --cwd; a `continued` object overrides fields when --continue is passed.
+let scenario = JSON.parse(readFileSync(process.env.FAKE_OMP_SCENARIO, "utf8").replaceAll("{{cwd}}", cwd));
+if (argv.includes("--continue") && scenario.continued) scenario = { ...scenario, ...scenario.continued };
 
 if (process.env.FAKE_OMP_LOG) {
   appendFileSync(process.env.FAKE_OMP_LOG, JSON.stringify({ argv, cwd, continued: argv.includes("--continue"), pid: process.pid }) + "\n");
@@ -23,8 +25,13 @@ for (const [rel, content] of Object.entries(scenario.writeFiles ?? {})) {
   mkdirSync(dirname(p), { recursive: true });
   writeFileSync(p, content);
 }
-const emit = (text, usd = 0) =>
+// Real omp records every assistant message (with usage) in <session-dir>/*.jsonl; the bridge sums those files.
+const sessionDir = flag("--session-dir");
+const emit = (text, usd = 0) => {
+  const line = { message: { role: "assistant", usage: { input: 100, output: 50, cost: { total: usd } } } };
+  if (sessionDir) { mkdirSync(sessionDir, { recursive: true }); appendFileSync(join(sessionDir, "main.jsonl"), JSON.stringify(line) + "\n"); }
   console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], usage: { input: 100, output: 50, cost: { total: usd } } } }));
+};
 
 process.on("SIGTERM", () => process.exit(143));
 for (const step of scenario.steps ?? []) {

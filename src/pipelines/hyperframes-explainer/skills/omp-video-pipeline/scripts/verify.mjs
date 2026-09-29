@@ -17,7 +17,7 @@ if (!project) {
   process.exit(2);
 }
 // realpath: upstream CLIs have a main guard that silently no-ops when invoked through the ~/.pi symlink.
-const scripts = realpathSync(join(homedir(), ".pi/agent/skills/faceless-explainer/scripts"));
+const scripts = realpathSync(process.env.UPSTREAM_SCRIPTS ?? join(homedir(), ".pi/agent/skills/faceless-explainer/scripts"));
 const own = new URL(".", import.meta.url).pathname;
 const run = (cmd, args, { allowFail = false } = {}) => {
   try {

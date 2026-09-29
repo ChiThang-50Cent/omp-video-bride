@@ -40,6 +40,12 @@ export interface Job {
   resumes: number;
   /** True when the next start must continue the existing omp session. */
   resume: boolean;
+  /** Why the session continues: an interruption (crash/restart) or a passed approval gate. */
+  resumeReason: "crash" | "approval" | null;
+  /** Links to the entities this job works on. */
+  refs: { projectId?: string; sceneId?: string; versionId?: string };
+  /** Reviewer notes from the approval gate, applied when the job continues. */
+  approvalNotes: string | null;
   /** "main" until the approval gate is passed, then "after-approval". */
   phase: "main" | "after-approval";
   usage: Usage;
@@ -58,19 +64,21 @@ export type JobEvent =
   | { type: "reject"; error: JobError }
   | { type: "cancel"; reason?: string }
   | { type: "need_approval" }
-  | { type: "approve" }
+  | { type: "approve"; notes?: string }
   | { type: "interrupt" }
   | { type: "resume" }
   | { type: "usage"; usage: Usage };
 
 export class IllegalTransition extends Error {
-  constructor(
-    readonly jobId: string,
-    readonly from: JobState,
-    readonly event: JobEvent["type"],
-  ) {
+  readonly jobId: string;
+  readonly from: JobState;
+  readonly event: JobEvent["type"];
+  constructor(jobId: string, from: JobState, event: JobEvent["type"]) {
     super(`job ${jobId}: event "${event}" is not allowed in state "${from}"`);
     this.name = "IllegalTransition";
+    this.jobId = jobId;
+    this.from = from;
+    this.event = event;
   }
 }
 
@@ -93,6 +101,7 @@ export function newJob(init: {
   input: unknown;
   metadata?: Record<string, unknown>;
   limits?: Partial<Job["limits"]>;
+  refs?: Job["refs"];
   now: string;
 }): Job {
   return {
@@ -106,6 +115,9 @@ export function newJob(init: {
     attempts: 0,
     resumes: 0,
     resume: false,
+    resumeReason: null,
+    refs: init.refs ?? {},
+    approvalNotes: null,
     phase: "main",
     usage: { usd: 0, inputTokens: 0, outputTokens: 0 },
     error: null,
@@ -124,6 +136,7 @@ export function transition(job: Job, event: JobEvent, now: string): Job {
   switch (event.type) {
     case "start":
       next.state = "running";
+      next.resume = false;
       next.attempts = job.attempts + 1;
       next.startedAt = job.startedAt ?? now;
       break;
@@ -137,7 +150,9 @@ export function transition(job: Job, event: JobEvent, now: string): Job {
       // The same omp session continues with the approval notes.
       next.state = "queued";
       next.resume = true;
+      next.resumeReason = "approval";
       next.phase = "after-approval";
+      next.approvalNotes = event.notes ?? null;
       break;
     case "interrupt":
       next.state = "interrupted";
@@ -150,6 +165,7 @@ export function transition(job: Job, event: JobEvent, now: string): Job {
       } else {
         next.state = "queued";
         next.resume = true;
+        next.resumeReason = "crash";
         next.resumes = job.resumes + 1;
       }
       break;

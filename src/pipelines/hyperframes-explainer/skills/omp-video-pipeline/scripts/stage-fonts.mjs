@@ -19,7 +19,7 @@ if (!existsSync(frameMd)) {
   console.error(`no frame.md in ${project}; run build-frame first`);
   process.exit(1);
 }
-const presetFonts = join(homedir(), ".pi/agent/skills/hyperframes-creative/frame-presets", preset, "fonts");
+const presetFonts = join(process.env.PRESETS_DIR ?? join(homedir(), ".pi/agent/skills/hyperframes-creative/frame-presets"), preset, "fonts");
 const cache = join(homedir(), ".cache/omp-video-fonts");
 const dest = join(project, "assets/fonts");
 mkdirSync(cache, { recursive: true });
