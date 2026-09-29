@@ -1,0 +1,5 @@
+.token
+data/
+node_modules/
+dist/
+*.log

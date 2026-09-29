@@ -1,0 +1,32 @@
+[Unit]
+Description=Hermes -> omp video job bridge
+# Listens on the hermes_default gateway (172.22.0.1), which exists only once Docker has created the network.
+Requires=docker.service
+After=network-online.target docker.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=thangnc
+Group=thangnc
+# System units get no login environment: omp reads auth/config/skills from $HOME.
+Environment=HOME=/home/thangnc
+Environment=USER=thangnc
+Environment=PATH=/home/thangnc/.nvm/versions/node/v22.20.0/bin:/home/thangnc/.local/bin:/home/thangnc/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HYPERFRAMES_BROWSER_PATH=/home/thangnc/.local/share/hyperframes/chrome/chrome-headless-shell-linux64/chrome-headless-shell
+Environment=HYPERFRAMES_PYTHON=/home/thangnc/.local/share/hyperframes-tts/venv/bin/python
+Environment=BRIDGE_HOST=172.22.0.1
+Environment=BRIDGE_PORT=8765
+Environment=BRIDGE_JOBS_DIR=/home/thangnc/general/omp-videos
+WorkingDirectory=/home/thangnc/general/omp-video-bridge
+ExecStart=/home/thangnc/.nvm/versions/node/v22.20.0/bin/node /home/thangnc/general/omp-video-bridge/server.mjs
+# Restarting until 172.22.0.1 is up covers boot, where the hermes network appears after docker.service.
+Restart=always
+RestartSec=5
+# Stop kills omp and its render/TTS/Chrome children; running jobs resume with `omp --continue` on start.
+KillMode=control-group
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
