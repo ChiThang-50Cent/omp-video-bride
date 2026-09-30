@@ -1,5 +1,4 @@
-import { existsSync } from "node:fs";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { App } from "../../src/app/app.ts";
 import { harness, okScenario } from "./harness.ts";
@@ -22,6 +21,20 @@ describe("build", () => {
     const argv = JSON.parse(readFileSync(h.logFile, "utf8").trim().split("\n")[0]!).argv as string[];
     expect(argv.at(-1)).toContain("How DNS works");
     expect(argv).not.toContain("--continue");
+  });
+
+  it("publishes media readable by a different container UID without exposing private files", async () => {
+    const h = harness();
+    const scenario = okScenario();
+    h.scenario({ ...scenario, writeMode: 0o600, writeFiles: { ...scenario.writeFiles, "private.txt": "private" } });
+    const { job, version } = h.app.createVideo({ topic: "Shared read-only video mount" });
+    await h.app.idle();
+    expect(h.app.job(job.id).state).toBe("succeeded");
+    const v = h.app.version(version.id);
+    for (const path of [v.outputs.video!, ...v.outputs.contactSheets, v.outputs.captionsGroups!]) {
+      expect(statSync(path).mode & 0o777).toBe(0o644);
+    }
+    expect(statSync(`${v.workdir}/private.txt`).mode & 0o777).toBe(0o600);
   });
 
   it("fails the job when the reported video is not on disk", async () => {

@@ -4,7 +4,8 @@
 //   { "steps": [ {"text": "...", "usd": 0.1}, {"sleepMs": 500}, ... ],
 //     "final": "text of the last assistant message",
 //     "exit": 0,
-//     "writeFiles": { "relative/path": "content" }   // created under --cwd
+//     "writeFiles": { "relative/path": "content" },  // created under --cwd
+//     "writeMode": 384                             // optional file mode (0600)
 //   }
 // Every invocation appends {argv, cwd, continued} to FAKE_OMP_LOG (JSONL), so tests can assert on it.
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -23,7 +24,7 @@ if (process.env.FAKE_OMP_LOG) {
 for (const [rel, content] of Object.entries(scenario.writeFiles ?? {})) {
   const p = join(cwd, rel);
   mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, content);
+  writeFileSync(p, content, { mode: scenario.writeMode ?? 0o644 });
 }
 // Real omp records every assistant message (with usage) in <session-dir>/*.jsonl; the bridge sums those files.
 const sessionDir = flag("--session-dir");

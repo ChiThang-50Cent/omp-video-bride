@@ -1,7 +1,13 @@
 # Changelog
 
+## v2.0.1
+
+- Publish video, contact sheets, caption data and approval documents as `0644`, so Hermes can read the read-only bind mount under its own UID. Session/config files are unchanged.
+- Hermes skill: authenticated bridge access, host-to-container path translation, explicit owner-granted per-route `terminal`/`file`/`skills`, and actual attachments via `/opt/hermes/bin/hermes send`. Sender warnings are treated as partial delivery, not success for every file.
+- Live verification: storyboard gate stopped before audio/frames; reviewer notes applied on continuation; preview produced no MP4; native render produced a 20.47s H.264/AAC 1080p/30 video without LLM usage. Real completion replay sent MP4 and contact sheet to Telegram without warnings. The preview retained 11 contrast warnings.
+
 ## v2.0.0 (unreleased)
-Full rewrite in TypeScript. v1 (`server.mjs`) stays on `master` until cutover.
+Full rewrite in TypeScript. The running service uses v2; v1 sources remain available in historical commit `068109c`.
 
 - Core job state machine (pure), SQLite store with migrations, `Pipeline` plugin port; HyperFrames explainer is the first pipeline.
 - `/v1` API: videos, projects, scenes, versions (revise, rollback), assets (sha256 dedupe), timeline, stitch (ffmpeg, cut or 0.5 s crossfade), jobs (approve, cancel).

@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { type Asset, type Project, type Scene, type Version, assetKind, slug } from "../core/entities.ts";
+import { type Asset, type Project, type Scene, type Version, type VersionOutputs, assetKind, slug } from "../core/entities.ts";
 import { type Job, type JobEvent, type JobKind, limitExceeded, newJob } from "../core/job.ts";
 import type { Pipeline, PromptCtx } from "../ports/pipeline.ts";
 import type { RunHandle, Runner } from "../ports/runner.ts";
@@ -396,6 +396,9 @@ export class App {
     }
     if (parsed.kind === "awaiting_approval") {
       this.d.store.tx(() => {
+        // Approval documents are shared through the read-only Hermes mount.
+        chmodSync(parsed.storyboard, 0o644);
+        if (parsed.script) chmodSync(parsed.script, 0o644);
         this.d.store.putVersion({ ...this.version(version.id), projectDir: parsed.projectDir, notes: null });
         this.apply(job.id, { type: "need_approval" });
       });
@@ -405,6 +408,7 @@ export class App {
       ...this.version(version.id), state: "ready", projectDir: parsed.projectDir,
       outputs: { video: parsed.video, contactSheets: parsed.contactSheets, captionsGroups: parsed.captionsGroups }, durationSec: parsed.durationSec, notes: parsed.note,
     };
+    this.makeOutputsReadable(done.outputs);
     this.d.store.tx(() => {
       this.d.store.putVersion(done);
       this.registerFoundAssets(project.id);
@@ -413,12 +417,21 @@ export class App {
     });
   }
 
+  private makeOutputsReadable(outputs: VersionOutputs): void {
+    // Snapshot writers may use 0600. Hermes has a different UID; publish only
+    // the intentional delivery artifacts, never sessions, overlays or sources.
+    for (const path of [outputs.video, ...outputs.contactSheets, outputs.captionsGroups]) {
+      if (path) chmodSync(path, 0o644);
+    }
+  }
+
   private async executeRender(job: Job, entry: { abort: AbortController; cancelled?: string }): Promise<void> {
     const v = this.version((job.input as { versionId: string }).versionId);
     const pipeline = this.pipeline(job.pipeline);
     try {
       const r = await pipeline.render(v.projectDir!, entry.abort.signal);
       if (entry.cancelled !== undefined) { this.apply(job.id, { type: "cancel", reason: entry.cancelled }); return; }
+      this.makeOutputsReadable({ ...v.outputs, video: r.video });
       this.d.store.tx(() => {
         this.d.store.putVersion({ ...this.version(v.id), outputs: { ...v.outputs, video: r.video }, durationSec: r.durationSec ?? v.durationSec });
         this.d.store.putScene({ ...this.scene(v.sceneId), currentVersionId: v.id });
