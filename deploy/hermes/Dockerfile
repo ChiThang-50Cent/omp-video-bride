@@ -23,7 +23,7 @@ RUN uv sync --frozen --no-install-project --no-dev
 COPY --from=source /src/ /opt/hermes/
 RUN uv pip install --python /opt/hermes/.venv/bin/python --no-cache "python-telegram-bot[webhooks]==22.8" "aiohttp==3.14.3" "qrcode==7.4.2" && uv pip install --python /opt/hermes/.venv/bin/python --no-cache --no-deps -e /opt/hermes
 
-FROM python:3.13.13-slim-trixie@sha256:7ba5f5888fbe0014ab9edb2278922995c2201fc3752c46b0be24763eb46fa9f3 AS runtime
+FROM python:3.14.7-slim-trixie@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d AS runtime
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 HERMES_HOME=/opt/data HERMES_WRITE_SAFE_ROOT=/opt/data HERMES_DISABLE_LAZY_INSTALLS=1 HERMES_LAZY_INSTALL_TARGET=/opt/data/lazy-packages PATH=/opt/hermes/bin:/opt/hermes/.venv/bin:/opt/data/.local/bin:${PATH}
 RUN apt-get -o Acquire::Retries=3 update && apt-get -o Acquire::Retries=3 install -y --no-install-recommends ca-certificates curl ffmpeg git openssh-client procps ripgrep tini libatomic1 libffi8 && rm -rf /var/lib/apt/lists/* && useradd --uid 10000 --create-home --home-dir /opt/data hermes && mkdir -p /opt/hermes /opt/data /opt/hermes/bin && chown -R hermes:hermes /opt/data
 COPY --from=sqlite-build /opt/sqlite-fixed/lib/libsqlite3.so.3.53.4 /usr/local/lib/
