@@ -1,0 +1,89 @@
+# syntax=docker/dockerfile:1.7
+# Dependency-only image. Application edits do not invalidate these stages.
+ARG UBUNTU_DIGEST=sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
+
+FROM ubuntu:24.04@${UBUNTU_DIGEST} AS runtime-inputs
+RUN apt-get update && apt-get install -y --no-install-recommends python3.12 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY deploy/prepare-assets.py deploy/runtime-lock.json /fetch/
+RUN python3.12 /fetch/prepare-assets.py --runtime /inputs
+
+FROM ubuntu:24.04@${UBUNTU_DIGEST} AS node-deps
+COPY --from=runtime-inputs /inputs/node /opt/node
+ENV PATH=/opt/node/bin:$PATH
+WORKDIR /build/hyperframes
+COPY deploy/hyperframes/package.json deploy/hyperframes/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci --ignore-scripts --no-audit --fund=false --omit=dev \
+    && npm cache add hyperframes@0.8.82 --cache /build/npm-cache --no-audit --fund=false \
+    && rm -rf /build/npm-cache/_logs /build/npm-cache/_update-notifier-last-checked
+
+FROM ubuntu:24.04@${UBUNTU_DIGEST} AS whisper-builder
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential cmake ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=runtime-inputs /inputs/whisper-src /src/whisper.cpp
+RUN cmake -S /src/whisper.cpp -B /build/whisper \
+      -DCMAKE_BUILD_TYPE=Release -DCMAKE_SKIP_RPATH=ON -DBUILD_SHARED_LIBS=OFF \
+      -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_SERVER=OFF \
+      -DWHISPER_CURL=OFF -DGGML_STATIC=ON -DGGML_NATIVE=OFF -DGGML_SSE42=OFF \
+      -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_BMI2=OFF -DGGML_FMA=OFF \
+      -DGGML_F16C=OFF -DGGML_OPENMP=OFF -DGGML_CCACHE=OFF \
+      -DCMAKE_C_FLAGS='-O2' -DCMAKE_CXX_FLAGS='-O2' \
+    && cmake --build /build/whisper --target whisper-cli -j2 \
+    && install -D /build/whisper/bin/whisper-cli /opt/whisper/bin/whisper-cli \
+    && ! readelf -d /opt/whisper/bin/whisper-cli | grep -E 'RPATH|RUNPATH'
+
+FROM ubuntu:24.04@${UBUNTU_DIGEST} AS python-builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+       python3.12 python3.12-venv python3-pip espeak-ng libespeak-ng-dev libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+COPY deploy/requirements.worker.txt /tmp/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip python3.12 -m venv /opt/tts-venv \
+    && /opt/tts-venv/bin/python -m pip install --disable-pip-version-check -r /tmp/requirements.txt
+
+FROM ubuntu:24.04@${UBUNTU_DIGEST} AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+       python3.12 ca-certificates curl ffmpeg fonts-liberation wget xdg-utils \
+       espeak-ng libespeak-ng1 libsndfile1 libgomp1 libstdc++6 \
+       libasound2t64 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 \
+       libcairo2 libcups2 libcurl4 libdbus-1-3 libexpat1 libgbm1 \
+       libglib2.0-0 libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 libudev1 \
+       libvulkan1 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 \
+       libxfixes3 libxkbcommon0 libxrandr2 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=runtime-inputs /inputs/node /opt/node
+COPY --from=runtime-inputs /inputs/omp /opt/omp/omp
+COPY --from=runtime-inputs /inputs/skills /opt/skills
+COPY --from=node-deps /build/hyperframes/node_modules /opt/hyperframes/node_modules
+COPY --from=whisper-builder /opt/whisper /opt/whisper
+COPY --from=python-builder /opt/tts-venv /opt/tts-venv
+COPY --from=node-deps --chown=1001:1001 /build/npm-cache /opt/npm-cache
+COPY deploy/hyperframes/package.json deploy/hyperframes/package-lock.json /opt/hyperframes/
+RUN groupadd --gid 1001 worker \
+    && useradd --uid 1001 --gid 1001 --create-home --home-dir /home/worker --shell /bin/bash worker \
+    && install -d -o 1001 -g 1001 /data/worker /tmp/omp-worker \
+       /home/worker/.cache/hyperframes /home/worker/.cache/omp-video-fonts \
+       /home/worker/.cache/hyperframes/tts \
+       /home/worker/.config /home/worker/.omp /home/worker/.pi/agent /home/worker/.agents \
+       /home/worker/.local/share/hyperframes/chrome \
+    && ln -s /opt/hyperframes/node_modules/hyperframes /opt/node/lib/node_modules/hyperframes \
+    && ln -s /opt/hyperframes/node_modules/.bin/hyperframes /opt/node/bin/hyperframes \
+    && ln -s /opt/skills /home/worker/.pi/agent/skills \
+    && ln -s /opt/skills /home/worker/.agents/skills \
+    && ln -s /assets/tts/models /home/worker/.cache/hyperframes/tts/models \
+    && ln -s /assets/tts/voices /home/worker/.cache/hyperframes/tts/voices \
+    && ln -s /assets/whisper/models /opt/whisper/models \
+    && ln -s /opt/whisper /home/worker/.cache/hyperframes/whisper \
+    && ln -s /assets/chrome /home/worker/.local/share/hyperframes/chrome/chrome-headless-shell-linux64
+ENV HOME=/home/worker USER=worker \
+    PATH=/opt/omp:/opt/node/bin:/opt/whisper/bin:/usr/local/bin:/usr/bin:/bin \
+    NPM_CONFIG_CACHE=/opt/npm-cache XDG_CACHE_HOME=/home/worker/.cache \
+    TMPDIR=/tmp/omp-worker \
+    HYPERFRAMES_BROWSER_PATH=/assets/chrome/chrome-headless-shell \
+    HYPERFRAMES_PYTHON=/opt/tts-venv/bin/python \
+    HYPERFRAMES_WHISPER_PATH=/opt/whisper/bin/whisper-cli
+WORKDIR /home/worker
+USER 1001:1001
+LABEL org.opencontainers.image.title="omp-video-runtime" \
+      org.opencontainers.image.node.version="22.20.0" \
+      org.opencontainers.image.hyperframes.version="0.8.82" \
+      org.opencontainers.image.omp.version="18.4.4"

@@ -1,0 +1,103 @@
+name: Publish verified images
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Exact package version to publish (for example 2.0.2)'
+        required: true
+        type: string
+permissions:
+  contents: read
+  packages: write
+concurrency:
+  group: image-release-${{ inputs.version }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22.22.3'
+          cache: npm
+      - name: Verify release input and source
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          test "$VERSION" = "$(node -p 'require("./package.json").version')"
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          npm ci
+          npm run check
+          npm run smoke:media
+          npm run smoke:ops
+      - name: Select registry namespace
+        id: registry
+        run: echo "prefix=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Runtime dependency image
+        id: runtime
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/Dockerfile.runtime
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.registry.outputs.prefix }}/omp-video-runtime:${{ inputs.version }}-cpu
+          provenance: mode=max
+          sbom: true
+      - name: Worker image
+        id: worker
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/Dockerfile.worker
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.registry.outputs.prefix }}/omp-video-worker:${{ inputs.version }}-cpu
+          build-args: WORKER_RUNTIME_IMAGE=${{ steps.registry.outputs.prefix }}/omp-video-runtime@${{ steps.runtime.outputs.digest }}
+          provenance: mode=max
+          sbom: true
+      - name: Hermes image
+        id: hermes
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/hermes/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.registry.outputs.prefix }}/omp-video-hermes:${{ inputs.version }}
+          provenance: mode=max
+          sbom: true
+      - name: Exercise final image digests without credentials
+        env:
+          PREFIX: ${{ steps.registry.outputs.prefix }}
+          WORKER_DIGEST: ${{ steps.worker.outputs.digest }}
+          HERMES_DIGEST: ${{ steps.hermes.outputs.digest }}
+        run: |
+          docker run --rm --network none --tmpfs /tmp:exec,mode=1777 -e TMPDIR=/tmp --entrypoint node -v "$PWD/tools:/opt/bridge/tools:ro" "$PREFIX/omp-video-worker@$WORKER_DIGEST" --disable-warning=ExperimentalWarning /opt/bridge/tools/smoke.ts
+          docker run --rm --network none --tmpfs /tmp:exec,mode=1777 -e TMPDIR=/tmp --entrypoint node -v "$PWD/tools:/opt/bridge/tools:ro" "$PREFIX/omp-video-worker@$WORKER_DIGEST" --disable-warning=ExperimentalWarning /opt/bridge/tools/smoke-media.ts
+          docker run --rm --network none --entrypoint /opt/hermes/.venv/bin/python "$PREFIX/omp-video-hermes@$HERMES_DIGEST" -c 'import sqlite3, telegram, aiohttp; assert sqlite3.sqlite_version_info >= (3, 51, 3); db = sqlite3.connect(":memory:"); db.execute("CREATE VIRTUAL TABLE smoke USING fts5(body)"); print("PASS Hermes SQLite/FTS5 and delivery dependencies")'
+      - name: Record immutable deployment references
+        env:
+          PREFIX: ${{ steps.registry.outputs.prefix }}
+          RUNTIME_DIGEST: ${{ steps.runtime.outputs.digest }}
+          WORKER_DIGEST: ${{ steps.worker.outputs.digest }}
+          HERMES_DIGEST: ${{ steps.hermes.outputs.digest }}
+        run: |
+          printf 'SOURCE_COMMIT=%s\nWORKER_RUNTIME_IMAGE=%s/omp-video-runtime@%s\nWORKER_IMAGE=%s/omp-video-worker@%s\nHERMES_IMAGE=%s/omp-video-hermes@%s\n' "$GITHUB_SHA" "$PREFIX" "$RUNTIME_DIGEST" "$PREFIX" "$WORKER_DIGEST" "$PREFIX" "$HERMES_DIGEST" > release-images.env
+          cat release-images.env >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-images-${{ inputs.version }}
+          path: release-images.env
+          if-no-files-found: error

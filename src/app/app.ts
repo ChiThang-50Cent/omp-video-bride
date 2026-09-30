@@ -1,8 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import { type Asset, type Project, type Scene, type Version, type VersionOutputs, assetKind, slug } from "../core/entities.ts";
-import { type Job, type JobEvent, type JobKind, limitExceeded, newJob } from "../core/job.ts";
+import { type Job, type JobEvent, type JobKind, type JobState, limitExceeded, newJob } from "../core/job.ts";
 import type { Pipeline, PromptCtx } from "../ports/pipeline.ts";
 import type { RunHandle, Runner } from "../ports/runner.ts";
 import type { Store } from "../ports/store.ts";
@@ -40,6 +40,8 @@ export interface JobOptions { metadata?: Record<string, unknown>; limits?: Limit
 interface BuildInput { versionId: string; instructions?: string; frames?: number[]; durationSec?: number | null; flags: { approve: "storyboard" | null; render: boolean } }
 
 const id = (prefix: string) => `${prefix}_${randomBytes(4).toString("hex")}`;
+
+const ACTIVE_JOB_STATES = ["queued", "running", "awaiting_approval", "interrupted"] as const satisfies readonly JobState[];
 
 export class App {
   readonly d: Deps;
@@ -121,9 +123,28 @@ export class App {
   projectDir(pid: string): string { return join(this.d.config.dataDir, "projects", pid); }
   assetsDir(pid: string): string { return join(this.projectDir(pid), "assets"); }
 
+  /** Active-state queries are unbounded so deletion cannot miss jobs past the store's normal 500-row cap. */
+  private activeJobs(pid: string): Job[] {
+    const jobs: Job[] = [];
+    for (const state of ACTIVE_JOB_STATES) jobs.push(...this.d.store.listJobs({ projectId: pid, state, limit: -1 }));
+    return jobs;
+  }
+
+  /** Imported v1 versions point outside this tree and must never be removed by scene deletion. */
+  private ownsVersionWorkdir(pid: string, sid: string, workdir: string): boolean {
+    const root = resolve(this.projectDir(pid), "scenes", sid);
+    return resolve(workdir).startsWith(`${root}${sep}`);
+  }
+
+  private isImportedVersion(version: Version): boolean {
+    const job = this.d.store.getJob(version.jobId);
+    if (!job || typeof job.input !== "object" || job.input === null) return false;
+    return "imported" in job.input && job.input.imported === true;
+  }
+
   deleteProject(pid: string): void {
     const p = this.project(pid);
-    const active = this.d.store.listJobs({ projectId: pid }).filter(j => j.state === "queued" || j.state === "running" || j.state === "awaiting_approval");
+    const active = this.activeJobs(pid);
     if (active.length) throw conflict("project_busy", `project has ${active.length} active job(s); cancel them first`);
     this.d.store.deleteProject(p.id);
     rmSync(this.projectDir(pid), { recursive: true, force: true });
@@ -142,7 +163,9 @@ export class App {
     this.d.store.tx(() => {
       this.d.store.putScene(s);
       const cur = this.project(pid);
-      this.d.store.putProject({ ...cur, timeline: { ...cur.timeline, order: [...cur.timeline.order, s.id] } });
+      const order = [...cur.timeline.order, s.id];
+      const transitions = Object.fromEntries(Object.entries(cur.timeline.transitions).filter(([sceneId]) => order.includes(sceneId)));
+      this.d.store.putProject({ ...cur, timeline: { ...cur.timeline, order, transitions }, final: null });
     });
     return s;
   }
@@ -153,14 +176,24 @@ export class App {
 
   deleteScene(sid: string): void {
     const s = this.scene(sid);
-    if (this.d.store.listJobs({ projectId: s.projectId }).some(j => j.refs.sceneId === sid && (j.state === "queued" || j.state === "running" || j.state === "awaiting_approval"))) {
-      throw conflict("scene_busy", "scene has an active job");
+    if (this.activeJobs(s.projectId).some(j => j.refs.sceneId === sid || j.kind === "stitch")) {
+      throw conflict("scene_busy", "scene or project stitch has an active job");
     }
+    const versions = this.d.store.listVersions(sid);
     this.d.store.tx(() => {
       this.d.store.deleteScene(sid);
       const cur = this.project(s.projectId);
-      this.d.store.putProject({ ...cur, timeline: { ...cur.timeline, order: cur.timeline.order.filter(x => x !== sid) } });
+      const order = cur.timeline.order.filter(x => x !== sid);
+      const transitions = Object.fromEntries(Object.entries(cur.timeline.transitions).filter(([sceneId]) => order.includes(sceneId)));
+      this.d.store.putProject({
+        ...cur,
+        timeline: { ...cur.timeline, order, transitions },
+        final: null,
+      });
     });
+    for (const version of versions) {
+      if (!this.isImportedVersion(version) && this.ownsVersionWorkdir(s.projectId, sid, version.workdir)) rmSync(version.workdir, { recursive: true, force: true });
+    }
   }
 
   // ------------------------------------------------- build / revise jobs
@@ -176,7 +209,7 @@ export class App {
   }
 
   private busyScene(scene: Scene): void {
-    const busy = this.d.store.listJobs({ projectId: scene.projectId }).find(j => j.refs.sceneId === scene.id && ["queued", "running", "awaiting_approval", "interrupted"].includes(j.state));
+    const busy = this.activeJobs(scene.projectId).find(j => j.refs.sceneId === scene.id);
     if (busy) throw conflict("scene_busy", `scene has active job ${busy.id} (${busy.state})`);
   }
 
@@ -221,7 +254,11 @@ export class App {
     if (v.sceneId !== sid) throw invalid("version belongs to another scene");
     if (v.state !== "ready") throw conflict("version_not_ready", "only ready versions can be selected");
     const next = { ...scene, currentVersionId: vid };
-    this.d.store.putScene(next);
+    this.d.store.tx(() => {
+      this.d.store.putScene(next);
+      const project = this.project(scene.projectId);
+      if (project.final) this.d.store.putProject({ ...project, final: null });
+    });
     return next;
   }
 
@@ -412,7 +449,11 @@ export class App {
     this.d.store.tx(() => {
       this.d.store.putVersion(done);
       this.registerFoundAssets(project.id);
-      if (parsed.video) this.d.store.putScene({ ...this.scene(scene.id), currentVersionId: done.id });
+      if (parsed.video) {
+        this.d.store.putScene({ ...this.scene(scene.id), currentVersionId: done.id });
+        const currentProject = this.project(project.id);
+        if (currentProject.final) this.d.store.putProject({ ...currentProject, final: null });
+      }
       this.apply(job.id, { type: "succeed", result: { versionId: done.id, video: done.outputs.video, contactSheets: done.outputs.contactSheets, durationSec: done.durationSec, notes: done.notes, framesChanged: parsed.changed } });
     });
   }
@@ -435,6 +476,9 @@ export class App {
       this.d.store.tx(() => {
         this.d.store.putVersion({ ...this.version(v.id), outputs: { ...v.outputs, video: r.video }, durationSec: r.durationSec ?? v.durationSec });
         this.d.store.putScene({ ...this.scene(v.sceneId), currentVersionId: v.id });
+        const scene = this.scene(v.sceneId);
+        const project = this.project(scene.projectId);
+        if (project.final) this.d.store.putProject({ ...project, final: null });
         this.apply(job.id, { type: "succeed", result: { versionId: v.id, video: r.video, durationSec: r.durationSec } });
       });
     } catch (e) {
@@ -487,24 +531,78 @@ export class App {
     mkdirSync(dir, { recursive: true });
     let name = safe;
     let n = 1;
-    while (existsSync(join(dir, name)) || this.d.store.listAssets(pid).some(a => a.name === name)) name = safe.replace(/(\.[^.]*)?$/, `-${++n}$1`);
-    const path = join(dir, name);
-    writeFileSync(path, i.data);
+    let path = "";
+    // Stage and hard-link so a concurrent writer cannot overwrite an existing name.
+    for (;;) {
+      while (existsSync(join(dir, name)) || this.d.store.listAssets(pid).some(a => a.name === name)) name = safe.replace(/(\.[^.]*)?$/, `-${++n}$1`);
+      path = join(dir, name);
+      const temp = `${path}.${randomBytes(8).toString("hex")}.tmp`;
+      try {
+        writeFileSync(temp, i.data, { flag: "wx" });
+      } catch (e) {
+        rmSync(temp, { force: true });
+        throw e;
+      }
+      try {
+        linkSync(temp, path);
+      } catch (e) {
+        rmSync(temp, { force: true });
+        if ((e as NodeJS.ErrnoException).code === "EEXIST") {
+          name = safe.replace(/(\.[^.]*)?$/, `-${++n}$1`);
+          continue;
+        }
+        throw e;
+      }
+      try {
+        unlinkSync(temp);
+      } catch (e) {
+        rmSync(temp, { force: true });
+        rmSync(path, { force: true });
+        throw e;
+      }
+      break;
+    }
     const asset: Asset = { id: id("ast"), projectId: pid, name, kind: assetKind(name), bytes: i.data.length, sha256, origin: i.origin ?? "upload", source: i.source ?? null, license: i.license ?? null, tags: i.tags ?? [], path, createdAt: this.now() };
-    this.d.store.putAsset(asset);
+    try {
+      this.d.store.tx(() => this.d.store.putAsset(asset));
+    } catch (e) {
+      rmSync(path, { force: true });
+      throw e;
+    }
     return { asset, duplicate: false };
   }
 
   deleteAsset(pid: string, aid: string): void {
     const a = this.d.store.getAsset(aid);
     if (!a || a.projectId !== pid) throw notFound("asset", aid);
-    this.d.store.tx(() => {
-      this.d.store.deleteAsset(aid);
-      for (const s of this.d.store.listScenes(pid)) {
-        if (s.assetRefs.some(r => r === aid || r === a.name)) this.d.store.putScene({ ...s, assetRefs: s.assetRefs.filter(r => r !== aid && r !== a.name) });
+    const scenes = this.d.store.listScenes(pid);
+    const affected = scenes.filter(s => s.assetRefs.some(r => r === aid || r === a.name));
+    const tombstone = `${a.path}.${randomBytes(8).toString("hex")}.deleting`;
+    let staged = false;
+    try {
+      if (existsSync(a.path)) {
+        renameSync(a.path, tombstone);
+        staged = true;
       }
-    });
-    rmSync(a.path, { force: true });
+      this.d.store.tx(() => {
+        this.d.store.deleteAsset(aid);
+        for (const s of affected) this.d.store.putScene({ ...s, assetRefs: s.assetRefs.filter(r => r !== aid && r !== a.name) });
+      });
+    } catch (e) {
+      if (staged) renameSync(tombstone, a.path);
+      throw e;
+    }
+    if (!staged) return;
+    try {
+      rmSync(tombstone, { force: true });
+    } catch (e) {
+      if (existsSync(tombstone) && !existsSync(a.path)) renameSync(tombstone, a.path);
+      this.d.store.tx(() => {
+        this.d.store.putAsset(a);
+        for (const s of affected) this.d.store.putScene(s);
+      });
+      throw e;
+    }
   }
 
   /** Images a worker saved under assets/found become project assets (origin ai-found). */
@@ -525,11 +623,13 @@ export class App {
   // ---------------------------------------------------------- timeline
   setTimeline(pid: string, t: { order?: string[]; transitions?: Record<string, "cut" | "fade"> }): Project {
     const p = this.project(pid);
+    const order = t.order ?? p.timeline.order;
     if (t.order) {
       const cur = [...p.timeline.order].sort().join();
       if ([...t.order].sort().join() !== cur) throw invalid("order must contain exactly the project's scene ids");
     }
-    const next = { ...p, timeline: { ...p.timeline, order: t.order ?? p.timeline.order, transitions: t.transitions ?? p.timeline.transitions } };
+    const transitions = Object.fromEntries(Object.entries(t.transitions ?? p.timeline.transitions).filter(([sceneId]) => order.includes(sceneId)));
+    const next = { ...p, timeline: { ...p.timeline, order, transitions }, final: null };
     this.d.store.putProject(next);
     return next;
   }

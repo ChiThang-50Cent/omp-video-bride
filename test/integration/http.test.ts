@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -25,7 +25,17 @@ describe("http", () => {
   it("requires the bearer token except on health", async () => {
     const { base } = await boot();
     expect((await fetch(`${base}/v1/jobs`)).status).toBe(401);
-    expect((await fetch(`${base}/v1/health`)).status).toBe(200);
+    expect((await fetch(`${base}/v1/jobs`, { headers: { authorization: "secret-token" } })).status).toBe(401);
+    expect((await fetch(`${base}/v1/jobs`, { headers: { authorization: "bearer secret-token" } })).status).toBe(401);
+    const health = await fetch(`${base}/v1/health`);
+    expect(health.status).toBe(200);
+    expect(health.headers.get("x-request-id")).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("rejects an empty server token before accepting requests", () => {
+    const h = harness();
+    const router = buildRouter(h.app, h.store, () => ({}));
+    expect(() => serve(router, { token: " \t\n", publicPaths: ["/v1/health"] })).toThrow(/token must not be empty/);
   });
 
   it("validates input with a structured error", async () => {
@@ -36,6 +46,17 @@ describe("http", () => {
     const bad = await call("POST", "/v1/videos", { topic: "Valid topic", spec: { voice: "vi_hoa" } });
     expect(bad.status).toBe(400);
     expect(bad.json.error.message).toContain("voice");
+  });
+
+  it("validates job list query state and limit at the HTTP boundary", async () => {
+    const { call } = await boot();
+    expect((await call("GET", "/v1/jobs")).status).toBe(200);
+    for (const query of ["limit=0", "limit=501", "limit=1.5", "limit=abc", "state=unknown"]) {
+      const r = await call("GET", `/v1/jobs?${query}`);
+      expect(r.status, query).toBe(400);
+      expect(r.json.error.code).toBe("invalid_request");
+    }
+    expect((await call("GET", "/v1/jobs?state=queued&limit=1")).status).toBe(200);
   });
 
   it("creates a video, exposes catalog, and returns the finished job with its version", async () => {
@@ -51,6 +72,21 @@ describe("http", () => {
     expect(j.json.job.metadata).toEqual({ chat: 42 });
     expect(j.json.version.outputs.video).toMatch(/video\.mp4$/);
     expect(j.json.events.map((e: any) => e.type)).toEqual(expect.arrayContaining(["start", "succeed"]));
+  });
+
+  it("keeps same-name assets distinct and deletes the file with its record", async () => {
+    const { h, call } = await boot();
+    const p = h.app.createProject({ name: "Asset names" });
+    const first = await call("POST", `/v1/projects/${p.id}/assets?name=logo.png`, undefined, Buffer.from("first"));
+    const second = await call("POST", `/v1/projects/${p.id}/assets?name=logo.png`, undefined, Buffer.from("second"));
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(second.json.asset.name).toBe("logo-2.png");
+    expect(readFileSync(first.json.asset.path, "utf8")).toBe("first");
+    expect(readFileSync(second.json.asset.path, "utf8")).toBe("second");
+    expect((await call("DELETE", `/v1/projects/${p.id}/assets/${first.json.asset.id}`)).status).toBe(200);
+    expect(existsSync(first.json.asset.path)).toBe(false);
+    expect((await call("GET", `/v1/projects/${p.id}/assets`)).json.assets.map((a: { id: string }) => a.id)).toEqual([second.json.asset.id]);
   });
 
   it("dedupes assets by content and lists them", async () => {

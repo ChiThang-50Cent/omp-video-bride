@@ -1,20 +1,24 @@
+; Rendered by deploy/install.sh. Do not copy this template directly into /etc/systemd/system.
 [Unit]
-Description=omp video bridge v2
-Requires=docker.service
-After=docker.service network-online.target
+Description=omp video bridge
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=thangnc
-WorkingDirectory=/home/thangnc/general/omp-video-bridge
-Environment=HOME=/home/thangnc
-Environment=USER=thangnc
-Environment=PATH=/home/thangnc/.nvm/versions/node/v22.20.0/bin:/home/thangnc/.local/bin:/home/thangnc/.bun/bin:/usr/local/bin:/usr/bin:/bin
-Environment=BRIDGE_CONFIG=/home/thangnc/.config/omp-video-bridge/config.json
-ExecStart=/home/thangnc/.nvm/versions/node/v22.20.0/bin/node --disable-warning=ExperimentalWarning src/main.ts
-Restart=always
+User=@USER@
+WorkingDirectory=@WORKDIR@
+Environment=@HOME_ENV@
+Environment=@USER_ENV@
+Environment=@PATH_ENV@
+Environment=@CONFIG_ENV@
+ExecStart=@NODE@ --disable-warning=ExperimentalWarning src/main.ts
+Restart=on-failure
 RestartSec=5
-TimeoutStopSec=20
+TimeoutStopSec=60
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
 
 [Install]
 WantedBy=multi-user.target

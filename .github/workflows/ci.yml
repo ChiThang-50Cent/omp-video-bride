@@ -1,0 +1,39 @@
+name: CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.22.3', '24']
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - name: Real media smoke
+        run: npm run smoke:media
+      - name: Deployment syntax
+        env:
+          OMP_VIDEO_STATE_DIR: /tmp/omp-video-ci-state
+        run: |
+          for script in deploy/install.sh deploy/setup.sh deploy/prepare-assets.sh deploy/hermes/entrypoint.sh; do sh -n "$script"; done
+          docker compose -f deploy/compose.yaml config --quiet
+          python3 -c 'import ast,pathlib; ast.parse(pathlib.Path("deploy/prepare-assets.py").read_text())'
+      - name: Operations smoke
+        run: npm run smoke:ops

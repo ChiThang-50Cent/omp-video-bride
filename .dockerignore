@@ -1,0 +1,33 @@
+# Only reproducible build recipes, locks and application source enter the context.
+**
+!package.json
+!package-lock.json
+!tsconfig.json
+!LICENSE
+!NOTICE
+!src/
+!src/**
+!deploy/
+!deploy/Dockerfile.runtime
+!deploy/Dockerfile.worker
+!deploy/runtime-lock.json
+!deploy/requirements.worker.txt
+!deploy/prepare-assets.py
+!deploy/prepare-assets.sh
+!deploy/worker-entrypoint.mjs
+!deploy/init-state.mjs
+!deploy/worker-config.example.json
+!deploy/hyperframes/
+!deploy/hyperframes/package.json
+!deploy/hyperframes/package-lock.json
+!deploy/hermes/
+!deploy/hermes/Dockerfile
+!deploy/hermes/entrypoint.sh
+# Explicit exclusions also apply to nested application inputs.
+**/.env
+**/.env.*
+**/.token
+**/node_modules
+**/__pycache__
+**/*.log
+**/agent.db*

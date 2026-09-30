@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { z } from "zod";
 
 // One JSON file (BRIDGE_CONFIG) plus env overrides for the deploy-specific bits.
@@ -11,9 +11,9 @@ const ConfigSchema = z.object({
   host: z.string().default("127.0.0.1"),
   port: z.number().int().min(1).max(65535).default(8765),
   /** File holding the bearer token. */
-  tokenFile: z.string().default(join(home, ".config/omp-video-bridge/token")),
+  tokenFile: z.string().min(1).refine(isAbsolute, "must be an absolute path").default(join(home, ".config/omp-video-bridge/token")),
   /** Root for the database and all project files. */
-  dataDir: z.string().default(join(home, ".local/share/omp-video-bridge")),
+  dataDir: z.string().min(1).refine(isAbsolute, "must be an absolute path").default(join(home, ".local/share/omp-video-bridge")),
   omp: z.object({
     bin: z.string().default(join(home, ".local/bin/omp")),
     /** Directories omp loads skills from, in addition to the pipeline's own. */

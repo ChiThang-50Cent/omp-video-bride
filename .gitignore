@@ -5,3 +5,16 @@ dist/
 *.log
 !hermes-skill/omp-video/SKILL.md
 !src/pipelines/hyperframes-explainer/skills/omp-video-pipeline/SKILL.md
+.env
+.env.*
+!.env.example
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+deploy/.env
+deploy/assets/
+deploy/state/
+deploy/build-inputs/

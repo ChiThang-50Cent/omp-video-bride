@@ -24,6 +24,7 @@ export interface Store {
 
   insertJob(job: Job): void;
   getJob(id: string): Job | undefined;
+  /** A negative limit disables the adapter's default cap for invariant checks. */
   listJobs(filter?: { state?: JobState; kind?: string; projectId?: string; limit?: number }): Job[];
   /** Loads, applies the state-machine event, saves and logs, in one transaction. */
   applyEvent(jobId: string, event: JobEvent, now: string): Job;

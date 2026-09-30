@@ -1,0 +1,41 @@
+# Browser-free Telegram/webhook Hermes runtime at the pinned upstream commit.
+# Source is fetched and verified during the build; no upstream checkout is vendored.
+FROM debian:13.4@sha256:e2d08da6f42ef4b09b165d55528a12727aeed8240dc9edf888e3ec07e10ef9da AS sqlite-build
+ARG SQLITE_AUTOCONF_VERSION=3530400
+ARG SQLITE_SHA256=0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c
+RUN apt-get -o Acquire::Retries=3 update && apt-get -o Acquire::Retries=3 install -y --no-install-recommends build-essential ca-certificates curl && rm -rf /var/lib/apt/lists/* && \
+    (curl -fsSL --retry 3 --retry-all-errors --connect-timeout 15 --max-time 120 -o /tmp/sqlite.tar.gz "https://sqlite.org/2026/sqlite-autoconf-${SQLITE_AUTOCONF_VERSION}.tar.gz" || curl -fsSL --retry 3 --retry-all-errors --connect-timeout 15 --max-time 120 -o /tmp/sqlite.tar.gz "https://sources.buildroot.net/sqlite/sqlite-autoconf-${SQLITE_AUTOCONF_VERSION}.tar.gz") && \
+    printf '%s  %s\n' "${SQLITE_SHA256}" /tmp/sqlite.tar.gz | sha256sum -c - && tar -xzf /tmp/sqlite.tar.gz -C /tmp && cd "/tmp/sqlite-autoconf-${SQLITE_AUTOCONF_VERSION}" && \
+    CFLAGS="-O2 -DSQLITE_ENABLE_FTS3 -DSQLITE_ENABLE_FTS3_PARENTHESIS -DSQLITE_ENABLE_FTS4 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_RTREE -DSQLITE_ENABLE_GEOPOLY -DSQLITE_ENABLE_COLUMN_METADATA -DSQLITE_ENABLE_UNLOCK_NOTIFY -DSQLITE_ENABLE_DBSTAT_VTAB -DSQLITE_ENABLE_DBPAGE_VTAB -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_PREUPDATE_HOOK -DSQLITE_ENABLE_SESSION -DSQLITE_SECURE_DELETE -DSQLITE_THREADSAFE=1 -DSQLITE_MAX_VARIABLE_NUMBER=250000" ./configure --prefix=/opt/sqlite-fixed --disable-static && make -j"$(nproc)" && make install
+
+FROM debian:13.4@sha256:e2d08da6f42ef4b09b165d55528a12727aeed8240dc9edf888e3ec07e10ef9da AS source
+ARG HERMES_COMMIT=f97608f178d1ffeca59860195ab7da295f7c8e5f
+ARG HERMES_ARCHIVE_SHA256=babbdb9706ad1c96708d75914afb45d809cd4b73dec1ceae233a6814f5ed97e3
+RUN apt-get -o Acquire::Retries=3 update && apt-get -o Acquire::Retries=3 install -y --no-install-recommends ca-certificates curl tar && rm -rf /var/lib/apt/lists/* && \
+    curl -fsSL --retry 3 --retry-all-errors --connect-timeout 15 --max-time 120 -o /tmp/hermes.tar.gz "https://codeload.github.com/NousResearch/hermes-agent/tar.gz/${HERMES_COMMIT}" && \
+    printf '%s  %s\n' "${HERMES_ARCHIVE_SHA256}" /tmp/hermes.tar.gz | sha256sum -c - && mkdir /src && tar -xzf /tmp/hermes.tar.gz --strip-components=1 -C /src && rm /tmp/hermes.tar.gz && \
+    rm -rf /src/.git /src/.github /src/apps /src/tests /src/website /src/assets /src/infographic /src/nix /src/packaging /src/plans /src/.plans /src/data /src/.hermes-docker /src/hermes-config /src/runtime /src/ui-tui/dist /src/ui-tui/packages/hermes-ink/dist /src/plugins/hermes-achievements/docs /src/flake.nix /src/flake.lock /src/.envrc /src/.gitattributes /src/.hadolint.yaml /src/.mailmap /src/log.txt /src/sqlite_leak_fix.png
+
+FROM ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df22866bd7857e5d304b67a564f4feab6ac22044dde719b AS python-deps
+WORKDIR /opt/hermes
+COPY --from=source /src/pyproject.toml /src/uv.lock /src/README.md ./
+RUN uv sync --frozen --no-install-project --no-dev
+COPY --from=source /src/ /opt/hermes/
+RUN uv pip install --python /opt/hermes/.venv/bin/python --no-cache "python-telegram-bot[webhooks]==22.8" "aiohttp==3.14.3" "qrcode==7.4.2" && uv pip install --python /opt/hermes/.venv/bin/python --no-cache --no-deps -e /opt/hermes
+
+FROM python:3.13.13-slim-trixie@sha256:7ba5f5888fbe0014ab9edb2278922995c2201fc3752c46b0be24763eb46fa9f3 AS runtime
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 HERMES_HOME=/opt/data HERMES_WRITE_SAFE_ROOT=/opt/data HERMES_DISABLE_LAZY_INSTALLS=1 HERMES_LAZY_INSTALL_TARGET=/opt/data/lazy-packages PATH=/opt/hermes/bin:/opt/hermes/.venv/bin:/opt/data/.local/bin:${PATH}
+RUN apt-get -o Acquire::Retries=3 update && apt-get -o Acquire::Retries=3 install -y --no-install-recommends ca-certificates curl ffmpeg git openssh-client procps ripgrep tini libatomic1 libffi8 && rm -rf /var/lib/apt/lists/* && useradd --uid 10000 --create-home --home-dir /opt/data hermes && mkdir -p /opt/hermes /opt/data /opt/hermes/bin && chown -R hermes:hermes /opt/data
+COPY --from=sqlite-build /opt/sqlite-fixed/lib/libsqlite3.so.3.53.4 /usr/local/lib/
+RUN ln -sf libsqlite3.so.3.53.4 /usr/local/lib/libsqlite3.so.0 && ln -sf libsqlite3.so.3.53.4 /usr/local/lib/libsqlite3.so && printf '/usr/local/lib\n' > /etc/ld.so.conf.d/000-sqlite-fixed.conf && ldconfig && python3 -c "import sqlite3; assert sqlite3.sqlite_version_info >= (3, 51, 3)"
+COPY --from=python-deps /opt/hermes/.venv /opt/hermes/.venv
+COPY --from=source /src/ /opt/hermes/
+RUN ln -s /opt/hermes/.venv/bin/hermes /opt/hermes/bin/hermes && printf '%s\n' docker-hermes-telegram-webhook > /opt/hermes/.install_method && printf '%s\n' f97608f178d1ffeca59860195ab7da295f7c8e5f > /opt/hermes/.hermes_build_sha
+COPY deploy/hermes/entrypoint.sh /usr/local/bin/hermes-entrypoint
+RUN chmod 0755 /usr/local/bin/hermes-entrypoint
+USER hermes
+WORKDIR /opt/hermes
+VOLUME ["/opt/data"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/hermes-entrypoint"]
+CMD ["hermes"]
+LABEL org.opencontainers.image.revision="f97608f178d1ffeca59860195ab7da295f7c8e5f" org.opencontainers.image.source="https://github.com/NousResearch/hermes-agent" org.opencontainers.image.description="Telegram/webhook Hermes runtime without browser or desktop components"

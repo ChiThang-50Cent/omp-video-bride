@@ -1,0 +1,24 @@
+{
+  "host": "0.0.0.0",
+  "port": 8765,
+  "tokenFile": "/run/secrets/bridge-token",
+  "dataDir": "/data/worker",
+  "omp": {
+    "bin": "/opt/omp/omp",
+    "skillDirs": ["/home/worker/.pi/agent/skills"],
+    "firstEventTimeoutSeconds": 120
+  },
+  "runner": {
+    "concurrency": 1,
+    "defaultMaxMinutes": 60,
+    "defaultMaxUsd": 5
+  },
+  "env": {
+    "HYPERFRAMES_BROWSER_PATH": "/assets/chrome/chrome-headless-shell",
+    "HYPERFRAMES_PYTHON": "/opt/tts-venv/bin/python",
+    "HYPERFRAMES_WHISPER_PATH": "/opt/whisper/bin/whisper-cli",
+    "HOME": "/home/worker",
+    "TMPDIR": "/tmp/omp-worker"
+  },
+  "containerMount": {"host": "/data/worker", "container": "/videos-v2"}
+}

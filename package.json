@@ -1,16 +1,26 @@
 {
   "name": "omp-video-bridge",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "private": true,
   "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ChiThang-50Cent/omp-video-bride.git"
+  },
   "engines": {
-    "node": ">=22.20.0"
+    "node": "^22.20.0 || ^24.0.0 || >=26.0.0"
   },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/main.ts",
     "dev": "node --watch --disable-warning=ExperimentalWarning src/main.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "smoke": "node --disable-warning=ExperimentalWarning tools/smoke.ts",
+    "smoke:media": "node --disable-warning=ExperimentalWarning tools/smoke-media.ts",
+    "smoke:ops": "node --disable-warning=ExperimentalWarning tools/smoke-ops.ts",
+    "smoke:webhook": "node --disable-warning=ExperimentalWarning tools/smoke-webhook.ts",
+    "check": "npm run typecheck && npm test && npm run smoke && npm run smoke:webhook"
   },
   "dependencies": {
     "zod": "^4.6.5"

@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
 import { ZodError, type ZodType } from "zod";
 import { AppError } from "../app/errors.ts";
@@ -56,13 +56,20 @@ async function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
 }
 
 export function serve(router: Router, opts: { token: string; publicPaths?: string[] }): Server {
-  const want = Buffer.from(opts.token);
+  const token = opts.token.trim();
+  if (!token) throw new Error("bearer token must not be empty");
+  const want = Buffer.from(token);
   return createServer(async (req, res) => {
+    const requestId = randomUUID();
+    res.setHeader("x-request-id", requestId);
     try {
       const url = new URL(req.url ?? "/", "http://x");
       const path = url.pathname;
       if (!opts.publicPaths?.includes(path)) {
-        const got = Buffer.from((req.headers.authorization ?? "").replace(/^Bearer /, ""));
+        const authorization = req.headers.authorization;
+        const prefix = "Bearer ";
+        if (!authorization?.startsWith(prefix)) return fail(res, 401, "unauthorized", "missing or invalid bearer token");
+        const got = Buffer.from(authorization.slice(prefix.length));
         if (got.length !== want.length || !timingSafeEqual(got, want)) return fail(res, 401, "unauthorized", "missing or invalid bearer token");
       }
       const m = router.match(req.method ?? "GET", path);
@@ -85,7 +92,14 @@ export function serve(router: Router, opts: { token: string; publicPaths?: strin
     } catch (e) {
       if (e instanceof AppError) return fail(res, e.status, e.code, e.message);
       if (e instanceof ZodError) return fail(res, 400, "invalid_request", e.issues.map(i => `${i.path.join(".") || "body"}: ${i.message}`).join("; "));
-      console.error(e);
+      console.error(JSON.stringify({
+        level: "error",
+        event: "http_unexpected_error",
+        requestId,
+        method: req.method ?? "GET",
+        path: (req.url ?? "/").split("?", 1)[0],
+        error: { name: e instanceof Error ? e.name : "UnknownError", message: e instanceof Error ? e.message : String(e) },
+      }));
       fail(res, 500, "internal_error", "unexpected error");
     }
   });

@@ -11,6 +11,8 @@ import { buildRouter } from "./http/routes.ts";
 import { serve } from "./http/router.ts";
 import { hyperframesExplainer } from "./pipelines/hyperframes-explainer/index.ts";
 
+const packageMetadata = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version?: string };
+
 const cfg = loadConfig();
 mkdirSync(cfg.dataDir, { recursive: true });
 if (!existsSync(cfg.tokenFile)) {
@@ -19,6 +21,7 @@ if (!existsSync(cfg.tokenFile)) {
   chmodSync(cfg.tokenFile, 0o600);
 }
 const token = readFileSync(cfg.tokenFile, "utf8").trim();
+if (!token) throw new Error(`token file ${cfg.tokenFile} is empty`);
 
 const store = new SqliteStore(join(cfg.dataDir, "bridge.db"));
 const now = () => new Date().toISOString();
@@ -37,7 +40,14 @@ const app = new App({
 });
 const dispatcher = cfg.webhook ? new Dispatcher(store, { ...cfg.webhook, mount: cfg.containerMount }) : undefined;
 
-const router = buildRouter(app, store, () => ({ webhook: cfg.webhook ? store.outboxCounts() : "disabled", jobs: { running: store.listJobs({ state: "running" }).length, queued: store.listJobs({ state: "queued" }).length } }));
+const router = buildRouter(app, store, () => ({
+  versions: {
+    app: packageMetadata.version ?? "unknown",
+    pipelines: Object.fromEntries(Object.values(app.d.pipelines).map(p => [p.id, p.version])),
+  },
+  webhook: cfg.webhook ? store.outboxCounts() : "disabled",
+  jobs: { running: store.listJobs({ state: "running", limit: -1 }).length, queued: store.listJobs({ state: "queued", limit: -1 }).length },
+}));
 const server = serve(router, { token, publicPaths: ["/v1/health"] });
 server.listen(cfg.port, cfg.host, () => {
   console.log(`omp-video-bridge v2 listening on http://${cfg.host}:${cfg.port} data=${cfg.dataDir}`);

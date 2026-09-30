@@ -1,0 +1,138 @@
+name: omp-video-bridge
+
+services:
+  worker-runtime:
+    profiles: [build]
+    image: ${WORKER_RUNTIME_IMAGE:-omp-video-runtime:18.4.4-hf0.8.82-cpu}
+    platform: linux/amd64
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.runtime
+
+  init-state:
+    profiles: [bootstrap]
+    image: ${WORKER_IMAGE:-omp-video-worker:2.0.2-cpu}
+    platform: linux/amd64
+    user: "0:0"
+    entrypoint: [node, /opt/bridge/deploy/init-state.mjs]
+    volumes:
+      - type: bind
+        source: ${OMP_VIDEO_STATE_DIR:?Set OMP_VIDEO_STATE_DIR to an absolute directory outside the repo}
+        target: /state
+        bind: {create_host_path: false}
+    network_mode: none
+    restart: "no"
+
+  init-assets:
+    image: ${WORKER_IMAGE:-omp-video-worker:2.0.2-cpu}
+    platform: linux/amd64
+    user: "1001:1001"
+    entrypoint: [/bin/sh, /opt/bridge/deploy/prepare-assets.sh]
+    command: [/assets]
+    volumes:
+      - type: bind
+        source: ${OMP_VIDEO_STATE_DIR}/assets
+        target: /assets
+        bind: {create_host_path: false}
+    restart: "no"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+  video-worker:
+    image: ${WORKER_IMAGE:-omp-video-worker:2.0.2-cpu}
+    platform: linux/amd64
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.worker
+      args:
+        WORKER_RUNTIME_IMAGE: ${WORKER_RUNTIME_IMAGE:-omp-video-runtime:18.4.4-hf0.8.82-cpu}
+    depends_on:
+      init-assets: {condition: service_completed_successfully}
+    environment:
+      HERMES_WEBHOOK_URL: http://hermes:8644/webhooks/omp-video
+    ports:
+      - "127.0.0.1:${OMP_VIDEO_HTTP_PORT:-8765}:8765"
+    volumes:
+      - type: bind
+        source: ${OMP_VIDEO_STATE_DIR}/assets
+        target: /assets
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${OMP_VIDEO_STATE_DIR}/video-data
+        target: /data/worker
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${OMP_VIDEO_STATE_DIR}/omp-state
+        target: /home/worker/.omp
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${OMP_VIDEO_STATE_DIR}/font-cache
+        target: /home/worker/.cache/omp-video-fonts
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${OMP_VIDEO_STATE_DIR}/worker-config.json
+        target: /etc/omp-video-bridge/config.json
+        read_only: true
+        bind: {create_host_path: false}
+    secrets: [bridge-token, webhook-secret]
+    # espeakng-loader copies its shared library into TMPDIR before dlopen.
+    tmpfs: ["/tmp:exec,mode=1777"]
+    shm_size: 512m
+    cpus: ${OMP_VIDEO_CPUS:-2}
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+
+  hermes:
+    image: ${HERMES_IMAGE:-omp-video-hermes:2026.9.24-telegram}
+    platform: linux/amd64
+    build:
+      context: ..
+      dockerfile: deploy/hermes/Dockerfile
+    command: [gateway, run]
+    depends_on:
+      video-worker: {condition: service_healthy}
+    environment:
+      WEBHOOK_ENABLED: "true"
+      WEBHOOK_HOST: 0.0.0.0
+      WEBHOOK_PORT: "8644"
+      OMP_BRIDGE_URL: http://video-worker:8765
+      OMP_BRIDGE_DATA_DIR: /data/worker
+      HOME: /opt/data
+    ports:
+      - "127.0.0.1:${OMP_VIDEO_WEBHOOK_PORT:-8644}:8644"
+    volumes:
+      - type: bind
+        source: ${OMP_VIDEO_STATE_DIR}/hermes
+        target: /opt/data
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${OMP_VIDEO_STATE_DIR}/video-data
+        target: /videos-v2
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ../hermes-skill/omp-video
+        target: /opt/data/skills/omp-video
+        read_only: true
+        bind: {create_host_path: false}
+    secrets: [bridge-token, webhook-secret]
+    tmpfs: [/tmp:mode=1777]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, curl, -fsS, http://127.0.0.1:8644/health]
+      interval: 10s
+      timeout: 3s
+      start_period: 30s
+      retries: 12
+
+secrets:
+  bridge-token:
+    file: ${OMP_VIDEO_STATE_DIR}/secrets/bridge-token
+  webhook-secret:
+    file: ${OMP_VIDEO_STATE_DIR}/secrets/webhook-secret

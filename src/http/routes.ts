@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { App } from "../app/app.ts";
 import { invalid } from "../app/errors.ts";
-import type { Job } from "../core/job.ts";
+import { JOB_STATES, type Job } from "../core/job.ts";
 import type { Store } from "../ports/store.ts";
 import { Router } from "./router.ts";
 
@@ -72,8 +72,20 @@ export function buildRouter(app: App, store: Store, health: () => Record<string,
 
   // --- jobs
   r.route("GET", "/v1/jobs", ({ query }) => {
-    const state = query.get("state") as Job["state"] | null;
-    return { jobs: store.listJobs({ state: state ?? undefined, projectId: query.get("project") ?? undefined, limit: Number(query.get("limit") ?? 50) }) };
+    const rawState = query.get("state");
+    let state: Job["state"] | undefined;
+    if (rawState !== null) {
+      if (!(JOB_STATES as readonly string[]).includes(rawState)) throw invalid(`state must be one of: ${JOB_STATES.join(", ")}`);
+      state = rawState as Job["state"];
+    }
+    const rawLimit = query.get("limit");
+    let limit = 50;
+    if (rawLimit !== null) {
+      const parsed = Number(rawLimit);
+      if (!/^\d+$/.test(rawLimit) || !Number.isSafeInteger(parsed) || parsed < 1 || parsed > 500) throw invalid("limit must be an integer from 1 to 500");
+      limit = parsed;
+    }
+    return { jobs: store.listJobs({ state, projectId: query.get("project") ?? undefined, limit }) };
   });
   r.route("GET", "/v1/jobs/:id", ({ params, query }) => {
     const job = app.job(params.id!);

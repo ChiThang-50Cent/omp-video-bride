@@ -1,6 +1,6 @@
 ---
 name: omp-video
-description: Make a narrated technical explainer video (MP4) by handing the job to the omp agent on the host. Use when the user asks for an explainer, concept, or tutorial video, a multi-part video, or a revision of one.
+description: Make a narrated technical explainer video (MP4) by handing the job to the separate omp video worker. Use when the user asks for an explainer, concept, or tutorial video, a multi-part video, or a revision of one.
 version: 2.0.1
 platforms: [linux]
 prerequisites:
@@ -14,9 +14,9 @@ metadata:
 
 # omp-video
 
-Video production does not run here. It runs in **omp** on the host, behind an HTTP API (`/v1`). omp uses the HyperFrames `faceless-explainer` workflow: storyboard, Kokoro voice-over, captions, parallel frame workers, render. Your job: turn the request into a job, hand over progress, deliver the result.
+Video production does not run here. It runs in a separate **omp worker** (host service or video-worker container), behind an HTTP API (`/v1`). omp uses the HyperFrames `faceless-explainer` workflow: storyboard, Kokoro voice-over, captions, parallel frame workers, render. Your job: turn the request into a job, hand over progress, deliver the result.
 
-Environment: `$OMP_BRIDGE_URL`, `$OMP_BRIDGE_TOKEN`. Use `H="Authorization: Bearer $OMP_BRIDGE_TOKEN"`. Finished files are read-only under `/videos-v2/` (host `/home/thangnc/general/omp-videos-v2/`). Webhook paths are rewritten to `/videos-v2/...`; API responses use host paths, so replace `/home/thangnc/general/omp-videos-v2/` with `/videos-v2/` before reading files here. Older videos map `/home/thangnc/general/omp-videos/` to `/videos/`.
+Environment: `$OMP_BRIDGE_URL`, `$OMP_BRIDGE_TOKEN`. Use `H="Authorization: Bearer $OMP_BRIDGE_TOKEN"`. Finished files are read-only under `/videos-v2/`. Webhook paths already use `/videos-v2/...`. API paths use the worker's data root: replace the exact `$OMP_BRIDGE_DATA_DIR/` prefix with `/videos-v2/` before reading files here. Repository Compose sets `OMP_BRIDGE_DATA_DIR=/data/worker`; the existing host deployment uses `/home/thangnc/general/omp-videos-v2`. If the variable is unset, use that existing host prefix. Older imported videos still map `/home/thangnc/general/omp-videos/` to `/videos/` and require the separate legacy read-only mount.
 
 All errors look like `{"error":{"code","message"}}`; 400 messages name the bad field and list allowed values.
 
@@ -155,4 +155,4 @@ curl -s -X POST "$B/v1/projects/<id>/stitch" -H "$H" -H "Content-Type: applicati
 ## Pitfalls
 - One job runs at a time; extra jobs queue.
 - `/videos-v2` is read-only; copy a file before modifying it.
-- Do not render with HyperFrames in this container. The host owns the pipeline.
+- Do not render with HyperFrames in this container. The separate omp worker owns the pipeline.

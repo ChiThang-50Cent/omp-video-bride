@@ -1,12 +1,12 @@
 # omp-video-bridge v2 — Current implementation
 
-Status: deployed. This document describes the current code and explicitly separates unimplemented items from the original design. v1 sources are retained in historical commit `068109c`, not alongside the running v2 source.
+Status: repository implementation. Prior v2 deployment evidence is recorded below; updating this checkout does not imply a production rollout. This document separates implemented behavior from retained design gaps. v1 sources are retained in historical commit `7634908`.
 
 ## 1. Architecture and commands
 
 Hermes runs in Docker; the bridge and omp run on the host. HyperFrames `faceless-explainer` is the first pipeline. The core job state machine contains no HyperFrames-specific behavior.
 
-Runtime: Node.js >=22.20.0, native TypeScript stripping, built-in `node:sqlite`, `node:http`, and zod. TypeScript is used for typechecking; Vitest runs the tests. There is no emitted `dist` deployment or separate build step.
+Runtime: Node.js `^22.20.0 || ^24.0.0 || >=26.0.0`, native TypeScript stripping, built-in `node:sqlite`, `node:http`, and zod. TypeScript is used for typechecking; Vitest runs the tests. There is no emitted `dist` deployment or separate build step.
 
 ```sh
 npm ci
@@ -14,9 +14,14 @@ npm start          # run src/main.ts
 npm run dev        # same entry point with Node watch mode
 npm run typecheck  # src, test and tools
 npm test
+npm run smoke       # authenticated API smoke
+npm run smoke:webhook
+npm run check      # typecheck + test + API + webhook smoke
 ```
 
 Production uses `deploy/omp-video-bridge.service`, which starts `src/main.ts` directly. `BRIDGE_CONFIG` selects a JSON configuration file; `BRIDGE_HOST`, `BRIDGE_PORT`, `BRIDGE_DATA_DIR` and `BRIDGE_TOKEN_FILE` override the corresponding settings. See `src/config.ts` for defaults and validation.
+
+`dataDir` and `tokenFile` must be nonempty absolute paths, including environment overrides. This keeps startup, host preflight and persisted artifact paths independent of the caller's working directory.
 
 ## 2. Domain and jobs
 
@@ -49,11 +54,11 @@ The HyperFrames implementation, prompt templates, custom skill, and helper scrip
 
 ## 4. HTTP API
 
-Every endpoint except `/v1/health` requires bearer authentication. Errors are `{"error":{"code":"…","message":"…"}}`. JSON bodies are limited to 1 MiB; raw asset uploads to 200 MiB.
+Every endpoint except `/v1/health` requires an explicit `Authorization: Bearer <token>` header. Empty/whitespace token files fail startup. Errors are `{"error":{"code":"…","message":"…"}}`; responses carry `X-Request-ID`, and unexpected HTTP failures are logged with request metadata, not bodies or credentials. JSON bodies are limited to 1 MiB; raw asset uploads to 200 MiB.
 
 | Method + path | Current behavior |
 |---|---|
-| `GET /v1/health` | Health, running/queued counts, webhook pending/dead counts or disabled |
+| `GET /v1/health` | App/pipeline versions, running/queued counts, webhook pending/dead counts or disabled |
 | `GET /v1/catalog` | All registered pipeline catalogs |
 | `POST /v1/videos` | Creates `{project,scene,job,version}` for a one-off build |
 | `POST/GET /v1/projects` | Create/list projects |
@@ -70,7 +75,7 @@ Every endpoint except `/v1/health` requires bearer authentication. Errors are `{
 | `DELETE /v1/projects/:id/assets/:aid` | Removes an asset and its scene references |
 | `PUT /v1/projects/:id/timeline` | Updates complete order and cut/fade transitions |
 | `POST /v1/projects/:id/stitch` | Joins current rendered versions in timeline order |
-| `GET /v1/jobs?state=&project=&limit=` | Lists jobs |
+| `GET /v1/jobs?state=&project=&limit=` | Lists jobs; state must be known, limit is a decimal integer 1–500 (default 50) |
 | `GET /v1/jobs/:id?events=1` | Job, related version, optional persisted events |
 | `POST /v1/jobs/:id/approve` | Continues a waiting job with optional notes |
 | `POST /v1/jobs/:id/cancel` | Cancels a nonterminal job |
@@ -95,13 +100,15 @@ SQLite (`<dataDir>/bridge.db`, WAL) is the source of truth. Files live under:
 
 Version records point to the pipeline's rendered video/contact sheets; no copied `outputs/` tree or `current` symlink is maintained. Published media/caption outputs and approval documents are made readable (`0644`) for Hermes's different UID. Private sessions/config files are not included in that permission change.
 
+Project/scene deletion refuses queued, running, awaiting-approval and interrupted work without a history-size cap. Scene deletion also refuses active project stitches, cleans owned version directories and timeline references, and preserves imported external workdirs and terminal job/event history. Scene/version/timeline changes invalidate the previous final output. Asset uploads deduplicate by hash and disambiguate colliding names; staged writes/deletes compensate database failures.
+
 Stitch uses FFmpeg re-encoding. Hard cut is the default; `fade` on an incoming scene applies an up-to-0.5s video/audio crossfade. Every timeline scene must have a current rendered version.
 
 `tools/import-v1.ts` imports finished v1 job chains as projects/scenes/versions without moving original files. It does not import legacy project manifests or unfinished jobs. Keep the old video directory mounted if imported versions are still used.
 
 ## 6. Hermes webhooks and deployment
 
-Hermes listens on port 8644, published on host loopback. `deploy/config.example.json` points the bridge to `http://127.0.0.1:8644/webhooks/omp-video`. The bridge itself binds the pinned Docker network gateway for container access.
+Host systemd deployments normally bind the bridge to loopback. The host example webhook URL is `http://127.0.0.1:8644/webhooks/omp-video`; the isolated Docker worker instead binds inside its Compose network and uses the configured Hermes service URL. Do not expose either deployment publicly without an authenticated reverse-proxy/network design.
 
 Signing: `X-Webhook-Signature-V2` is hex HMAC-SHA256 over `<timestamp>.<body>`, with `X-Webhook-Timestamp` and stable `X-Request-ID` delivery identity. Transactional outbox delivery is at-least-once, with retry backoff 10s / 1m / 5m / 30m, then dead.
 
@@ -111,12 +118,84 @@ Payload: `{event_type,event_id,at,job:{id,kind,state,refs,usage,error,result,pha
 
 The owner explicitly grants `terminal`, `file`, and `skills` only to the authenticated `omp-video` route. A notification is not approval. The custom Hermes skill uses authenticated curl to inspect jobs/documents, and `/opt/hermes/bin/hermes send --to telegram --json` for real MP4/contact-sheet attachments. Sender warnings identify partial failures even when `success:true`.
 
-`deploy/install.sh` installs/restarts the systemd unit only. Hermes skill copying, Docker port/mount configuration and webhook registration are separate operations; there is no automatic skill-version handshake in the installer.
+`deploy/install.sh` validates the actual `src/config.ts` schema and required host executables (nonempty private bearer token, omp, configured HyperFrames browser/Python providers, ffmpeg and ffprobe) before rendering a portable `deploy/omp-video-bridge.service` template. Install mode writes the unit and reloads systemd but does not enable, start, or restart production unless the operator supplies an explicit action flag; `--check-only` performs no writes or systemd calls. It never sources config with shell evaluation and has no machine-specific home/repository paths. Hermes skill copying, Docker port/mount configuration, and webhook registration remain separate operations; there is no automatic skill-version handshake in the installer.
+
+### Host systemd operation and offline recovery
+
+The service is single-instance per absolute `dataDir`; SQLite and artifacts must be backed up together while the service is stopped. `deploy/backup.mjs --stopped` validates a regular-file/directory data tree (rejecting links/special files), checkpoints WAL, runs `integrity_check`, and archives the complete tree with the host `tar` (hardlinks are copied independently, archive mode is `0600`); it never copies config/secrets or overwrites an existing archive. `deploy/restore.mjs --stopped` validates archive paths/types, requires an absent destination, checks SQLite integrity, and atomically restores into a new directory. Both tools refuse relative paths and require explicit stopped acknowledgement. Retention is manual (there is no automatic destructive pruning), and imported v1 sources need their original mount. See [`docs/OPS.md`](OPS.md) for exact upgrade, restore, permission, and webhook dead-letter commands.
+
+### 6.1 Repository Docker deployment (linux/amd64)
+
+This is an additional deployment recipe, not a production migration. The existing host systemd service and Hermes state remain unchanged. Docker Engine with BuildKit and Compose v2 are required; the host does not need Node/Python/model installations for this recipe.
+
+- `deploy/Dockerfile.runtime` builds the reusable CPU dependency base: pinned Node/omp/HyperFrames, Python TTS environment, portable Whisper binary, system libraries and the selected upstream skills. Upstream archives/binaries are fetched and SHA256-checked during the build; no local checkout or binary is required.
+- `deploy/Dockerfile.worker` adds production bridge dependencies, startup/configuration scripts and application source last. Models and Chrome are **not** in either worker image.
+- `deploy/hermes/Dockerfile` fetches the pinned Hermes commit and packages core Python, Telegram/webhooks, curl, FFmpeg, git/SSH, terminal/file/skills and fixed SQLite 3.53.4. No Node, browser, desktop/dashboard or build compiler is installed in the final image. This is not a replacement for every capability of the official Hermes image.
+- `deploy/runtime-lock.json`, `deploy/hyperframes/package-lock.json` and `deploy/requirements.worker.txt` retain the tested versions. Skills are the exact composite snapshot from upstream commits `663b02297d58b56d7153bb156451ebb2b830941b` and `2195db5e1d05f72d966e880e4d258a2e779fa143` (media-use only); automatic skill refresh is disabled in the worker. Native apt packages still come from the base distribution repositories, and Python wheels have version pins rather than hash pins: byte-identical whole-image rebuilds are not claimed.
+- `.dockerignore` allowlists source/recipes/locks and excludes `.token`, environment files, host dependencies, data and other heavy/state inputs. State/secrets/assets belong outside Git and outside the build context.
+
+From the repository root, start a **new isolated deployment** using unused loopback ports:
+
+```sh
+export OMP_VIDEO_STATE_DIR="$HOME/.local/state/omp-video-bridge-docker"
+export COMPOSE_PROJECT_NAME=omp-video-bridge
+export OMP_VIDEO_HTTP_PORT=18765
+export OMP_VIDEO_WEBHOOK_PORT=28644
+sh deploy/setup.sh
+```
+
+`setup.sh` defaults to `all`: build the base and application images, initialize external state/assets, then start and wait for healthy services. Separate actions are `build`, `init`, `up` and `down`. `down` does not remove persistent bind-mounted state. Keep the same exported state/project/port settings for subsequent commands. Raw Compose also requires `OMP_VIDEO_STATE_DIR`; the wrapper defaults it to the external directory above and rejects a state directory inside the repo. Default raw Compose ports are 8765/8644; do not collide with the existing deployment.
+
+For application-only rebuilds, reuse the dependency base:
+
+```sh
+docker compose -f deploy/compose.yaml build video-worker
+sh deploy/setup.sh up
+```
+
+External state layout:
+
+```text
+$OMP_VIDEO_STATE_DIR/
+  assets/                 # pinned models + complete Chrome tree + integrity receipt
+  video-data/             # SQLite, projects, versions, sessions, outputs
+  omp-state/              # dedicated worker .omp state/auth, not shared with host
+  font-cache/             # stage-fonts cache
+  hermes/                 # persistent Hermes configuration/auth/sessions
+  secrets/                # bridge-token and webhook-secret
+  worker-config.json      # operator-editable config, initially seeded from example
+```
+
+`init-state` seeds configuration/secrets only when absent and prepares UID1001 worker directories and UID10000 Hermes directories, including the writable skill parent before mounting `omp-video` beneath it read-only. The enclosing host state/secrets directories are private; each secret file is bound read-only into the authorized containers. No secret value is baked into an image or printed by setup. Configure provider credentials in the dedicated worker/Hermes state and Telegram credentials/home channel before submitting a real video or expecting Telegram delivery. Use the container CLIs rather than rw-sharing the host's live auth DB:
+
+Use a separate Telegram test bot while the old gateway is running. Reusing its production bot token in a second polling gateway causes competing consumers; switch gateways only during an explicit cutover.
+
+```sh
+docker compose -f deploy/compose.yaml run --rm --no-deps \
+  --entrypoint /opt/omp/omp video-worker
+docker compose -f deploy/compose.yaml exec hermes /opt/hermes/bin/hermes setup
+```
+
+`init-assets` downloads only pinned model revisions/Chrome with SHA256 verification. An initialized matching cache is reusable without network; incomplete/corrupt assets fail validation and are not silently accepted. Worker startup rechecks model hashes and the complete Chrome tree, then mounts `/assets` read-only. The TTS helper cache stays writable separately from its read-only `models/` and `voices/` links. Worker `/tmp` is executable tmpfs because espeakng-loader copies its shared library there before `dlopen`; capabilities remain dropped and no privileged/GPU/socket access is granted. Stop the worker before changing asset pins or repairing assets. Fonts/CDN scripts can still require network at render time; this is not a fully offline worker.
+
+The [pinned HF mirror model](https://huggingface.co/mikkoph/kokoro-onnx/tree/55c2af9958bf69eee07133cda380c1599c2f2bc5) preserves the previously tested Kokoro ONNX bytes. The canonical upstream release currently has a different model checksum; filenames alone are not version identity. Chrome comes from the [exact Chrome for Testing release](https://googlechromelabs.github.io/chrome-for-testing/156.0.8075.0.json).
+
+Worker API binds inside its container, Hermes uses `http://video-worker:8765`, and bridge webhooks use `http://hermes:8644/webhooks/omp-video`. Both host publications are loopback-only. `worker-config.json` maps `/data/worker` to Hermes `/videos-v2`; `OMP_BRIDGE_DATA_DIR=/data/worker` tells the mounted skill how to translate API paths. The bootstrap grants terminal/file/skills only to the HMAC-authenticated `omp-video` route; notifications are not approval. There is no unauthenticated probe secret or ephemeral tmpfs Hermes home.
+
+Do not copy a live SQLite file or point these paths at production data as an automatic cutover. Existing DB rows/session packets contain absolute host paths; data migration requires a consistent backup after drain/stop plus either preserving the old in-container namespace or a controlled path migration. Imported v1 references also require their separate legacy read-only mount.
+
+Observed isolated packaging smoke (2026-09-30): worker/Hermes health, bearer authorization and HMAC-V2 rejection/acceptance using an ignored event; standard offline bare/pinned npx; CPU Kokoro WAV (24kHz mono, 4.437s), Whisper small.en word timestamps; read-only assets and rejection of a corrupt voice checksum before startup; and a fresh 1920x1080@30 H.264/AAC render (~20.467s) readable by Hermes. The retained render fixture pins CLI 0.8.95 while the bridge deliberately uses 0.8.82; the fixture also reports 1 lint error/19 warnings, so this smoke does not claim a clean authoring audit. No paid LLM turn, actual Telegram send, production restore or ARM/offline verification is included.
+
+Independent final-artifact verification exercised a fresh final-tag container for CPU TTS, Chrome DOM execution, project scaffolding without skill refresh, full asset validation and a new 20.467s H.264/AAC render. It also verified CPU transcription, decoded and visually inspected the fresh video, proved Hermes's read-only view and terminal/file/skills/FTS5 behavior, verified bootstrap preservation and HMAC authentication, rejected corrupt assets before startup, scanned the Hermes rootfs for Node/browser/C compiler executables, and byte-compared all 406 selected skill files to the checksum-verified upstream archives. Verdict: PASS for the exercised Linux/amd64 packaging scope. Whole-image clean-build reproducibility and configured LLM/Telegram/production cutover remain outside that verdict.
+
+Docker Engine local image accounting on this machine: worker ~2.17GB versus previous ~4.22GB (about 48% lower), Hermes ~1.28GB; external assets ~1.13GB (~1.05GiB). Worker uncompressed layer sum is ~1.59GB. The base's ~2.16GB local size shares layers with the worker: do not add both as separate disk consumption. These are not registry transfer sizes. A fully cached worker-only rebuild took 4.05s; this is not a cold-build or first asset-download measurement.
 
 ## 7. Verification and retained design gaps
 
-Live smoke evidence covers a 30s video, cancel, crash-resume/revision, a two-scene logo project with crossfade stitch, storyboard approval with reviewer notes, preview without MP4, native render, and real Telegram MP4/contact-sheet delivery. The approval/preview sample retained 11 contrast warnings; runtime/layout checks did not report errors.
+Repository verification for 2.0.2: Node 22.22.3 typecheck and 52 tests passed; native service startup/auth/query/lifecycle/shutdown and real loopback HMAC-V2 retry/dead-letter delivery passed. Real FFmpeg cut/fade outputs were fully decoded as H.264/AAC at 320x180 (2.432s/1.932s). A 6,000-file stopped backup restored successfully; overwrite/link rejection, atomic redrive, systemd unit parsing, selected configuration and permission/path preflight were exercised. Fresh Linux/amd64 runtime/worker/Hermes images built successfully; the worker image passed native API and media smoke, and Hermes passed SQLite 3.53.4/FTS5/Telegram/aiohttp dependency smoke. No paid model call, actual Telegram send, production restore or rollout was performed in this verification.
 
-The original design also proposed items not implemented by the current code: generated OpenAPI, separate retry/log/event endpoints, scene PATCH, background-music mixing, stitched VTT/thumbnail output, automatic brand application, cheap-job priority, retention/pruning, and complete legacy-project import. Health does not report package/pipeline/skill versions. These are explicit gaps, not features supplied by cleanup.
+Earlier live smoke evidence covers a 30s video, cancel, crash-resume/revision, a two-scene logo project with crossfade stitch, storyboard approval with reviewer notes, preview without MP4, native render, and real Telegram MP4/contact-sheet delivery. The approval/preview sample retained 11 contrast warnings; runtime/layout checks did not report errors.
+
+The original design also proposed items not implemented by the current code: generated OpenAPI, separate retry/log/event endpoints, scene PATCH, background-music mixing, stitched VTT/thumbnail output, automatic brand application, cheap-job priority, automatic retention/pruning, and complete legacy-project import. Health reports app and registered pipeline/worker-skill versions, but there is no automatic compatibility handshake with Hermes or upstream runtime tools. Manual cleanup and stopped backup/restore procedures are operational safeguards, not automatic retention.
 
 Video directories, session history and DB files are retained. Cleanup does not delete them or remove rollback history from Git.

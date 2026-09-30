@@ -1,0 +1,7 @@
+{
+  "name": "omp-video-hyperframes-runtime",
+  "private": true,
+  "dependencies": {
+    "hyperframes": "0.8.82"
+  }
+}
