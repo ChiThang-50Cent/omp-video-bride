@@ -1,6 +1,6 @@
 # Browser-free Telegram/webhook Hermes runtime at the pinned upstream commit.
 # Source is fetched and verified during the build; no upstream checkout is vendored.
-FROM debian:13.4@sha256:e2d08da6f42ef4b09b165d55528a12727aeed8240dc9edf888e3ec07e10ef9da AS sqlite-build
+FROM debian:13.7@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c AS sqlite-build
 ARG SQLITE_AUTOCONF_VERSION=3530400
 ARG SQLITE_SHA256=0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c
 RUN apt-get -o Acquire::Retries=3 update && apt-get -o Acquire::Retries=3 install -y --no-install-recommends build-essential ca-certificates curl && rm -rf /var/lib/apt/lists/* && \
@@ -8,7 +8,7 @@ RUN apt-get -o Acquire::Retries=3 update && apt-get -o Acquire::Retries=3 instal
     printf '%s  %s\n' "${SQLITE_SHA256}" /tmp/sqlite.tar.gz | sha256sum -c - && tar -xzf /tmp/sqlite.tar.gz -C /tmp && cd "/tmp/sqlite-autoconf-${SQLITE_AUTOCONF_VERSION}" && \
     CFLAGS="-O2 -DSQLITE_ENABLE_FTS3 -DSQLITE_ENABLE_FTS3_PARENTHESIS -DSQLITE_ENABLE_FTS4 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_RTREE -DSQLITE_ENABLE_GEOPOLY -DSQLITE_ENABLE_COLUMN_METADATA -DSQLITE_ENABLE_UNLOCK_NOTIFY -DSQLITE_ENABLE_DBSTAT_VTAB -DSQLITE_ENABLE_DBPAGE_VTAB -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_PREUPDATE_HOOK -DSQLITE_ENABLE_SESSION -DSQLITE_SECURE_DELETE -DSQLITE_THREADSAFE=1 -DSQLITE_MAX_VARIABLE_NUMBER=250000" ./configure --prefix=/opt/sqlite-fixed --disable-static && make -j"$(nproc)" && make install
 
-FROM debian:13.4@sha256:e2d08da6f42ef4b09b165d55528a12727aeed8240dc9edf888e3ec07e10ef9da AS source
+FROM debian:13.7@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c AS source
 ARG HERMES_COMMIT=f97608f178d1ffeca59860195ab7da295f7c8e5f
 ARG HERMES_ARCHIVE_SHA256=babbdb9706ad1c96708d75914afb45d809cd4b73dec1ceae233a6814f5ed97e3
 RUN apt-get -o Acquire::Retries=3 update && apt-get -o Acquire::Retries=3 install -y --no-install-recommends ca-certificates curl tar && rm -rf /var/lib/apt/lists/* && \
