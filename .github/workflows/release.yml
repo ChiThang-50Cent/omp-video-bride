@@ -25,12 +25,18 @@ jobs:
         with:
           node-version: '22.22.3'
           cache: npm
-      - name: Verify release input and source
+      - name: Verify release input
         env:
           VERSION: ${{ inputs.version }}
         run: |
           test "$VERSION" = "$(node -p 'require("./package.json").version')"
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+      - name: Install media dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+      - name: Verify source
+        run: |
           npm ci
           npm run check
           npm run smoke:media

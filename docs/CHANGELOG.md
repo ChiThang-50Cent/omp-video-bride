@@ -10,6 +10,7 @@
 - Protect scene inputs during active project stitches, block deletion for interrupted work without a history-size cap, retain terminal audit events, preserve imported external files, and invalidate stale project outputs. Uploads with colliding names no longer overwrite prior assets; filesystem/database failures are compensated.
 - Add Node 22/24 CI, dependency update automation, native API/HMAC HTTP/real FFmpeg/operations smoke commands, and a manual GHCR release workflow with digest references, SBOM and provenance.
 - Publish the bridge source under the owner-selected Apache-2.0 license, with copyright NOTICE and license files included in the worker image.
+- Provision FFmpeg/ffprobe explicitly on ephemeral GitHub CI and release-verification runners instead of relying on the runner image's installed tools.
 - Verified locally: typecheck, 52 tests, native API/HMAC HTTP smoke, real FFmpeg full decode, 6,000-file backup/restore and installer unit parsing. Fresh worker/runtime/Hermes images built; isolated worker API/media and Hermes dependency smoke passed. Production dependencies reported zero npm audit vulnerabilities. No production rollout, paid model call or actual Telegram send was performed.
 
 ## 2.0.1 maintenance
