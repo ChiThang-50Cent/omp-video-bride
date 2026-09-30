@@ -3,3 +3,5 @@ data/
 node_modules/
 dist/
 *.log
+!hermes-skill/omp-video/SKILL.md
+!src/pipelines/hyperframes-explainer/skills/omp-video-pipeline/SKILL.md

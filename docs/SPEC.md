@@ -1,156 +1,122 @@
-# omp-video-bridge v2 — Spec (draft for review)
+# omp-video-bridge v2 — Current implementation
 
-Status: draft. Scope: rewrite of v1 (`server.mjs` + `projects.mjs`). No code until this is approved.
+Status: deployed. This document describes the current code and explicitly separates unimplemented items from the original design. v1 sources are retained in historical commit `068109c`, not alongside the running v2 source.
 
-## 1. Goals / non-goals
-Goals
-- Hermes (in Docker) orders videos, and omp (on the host) produces them through **pluggable pipelines**. HyperFrames `faceless-explainer` is the first pipeline. Others (Manim, screen-demo, other TTS) can be added without touching core, API or the Hermes skill.
-- Durable jobs: queue, cancel, resume after a crash, revise with versions, cost/time limits.
-- Multi-scene projects: shared look, assets and brand, plus stitching.
-- Push notifications to Hermes via its webhook platform. Polling still works.
-- Testable: domain and pipelines are unit-tested, and runner/API are integration-tested with a fake `omp`.
+## 1. Architecture and commands
 
-Non-goals (v2)
-- Multi-host workers, a web UI, and users/tenants (a single bearer token is the only auth).
+Hermes runs in Docker; the bridge and omp run on the host. HyperFrames `faceless-explainer` is the first pipeline. The core job state machine contains no HyperFrames-specific behavior.
 
-## 2. Domain model
+Runtime: Node.js >=22.20.0, native TypeScript stripping, built-in `node:sqlite`, `node:http`, and zod. TypeScript is used for typechecking; Vitest runs the tests. There is no emitted `dist` deployment or separate build step.
+
+```sh
+npm ci
+npm start          # run src/main.ts
+npm run dev        # same entry point with Node watch mode
+npm run typecheck  # src, test and tools
+npm test
 ```
-Project 1─* Scene 1─* Version            Asset *─1 Project
-                         │
-                         └─ produced by ─ Job (kind: build | revise | stitch)
-```
-| Entity | Key fields |
+
+Production uses `deploy/omp-video-bridge.service`, which starts `src/main.ts` directly. `BRIDGE_CONFIG` selects a JSON configuration file; `BRIDGE_HOST`, `BRIDGE_PORT`, `BRIDGE_DATA_DIR` and `BRIDGE_TOKEN_FILE` override the corresponding settings. See `src/config.ts` for defaults and validation.
+
+## 2. Domain and jobs
+
+- A project owns scenes, shared pipeline/spec, assets, timeline order/transitions, and its last stitched output.
+- A scene owns versions and selects a `currentVersionId`. Even a one-off video is a one-scene project.
+- A version records `parentVersionId`, its workdir/projectDir, state, duration, notes, and outputs: `video`, `contactSheets[]`, `captionsGroups`.
+- Jobs are `build`, `revise`, `render` or `stitch`. They carry entity references, opaque caller metadata, usage, limits, result/error, and timestamps.
+- Project, scene, version and asset records are JSON documents in indexed SQLite tables. Jobs and append-only events are persisted separately.
+
+States: `queued`, `running`, `awaiting_approval`, `interrupted`, `succeeded`, `failed`, `rejected`, `cancelled`. Transitions are implemented in `src/core/job.ts`; illegal transitions throw.
+
+Running omp jobs left by a bridge restart become interrupted and are requeued with `omp --continue`. Automatic crash resumes are limited to two. Approval continuation uses the same session without consuming a crash resume.
+
+Build approval (`approve:"storyboard"`) stops after the storyboard/script/preset, before audio and frames. The job waits until approved or cancelled; there is no automatic approval timeout. Reviewer notes are applied before production continues.
+
+Build preview (`render:false`) produces frame compositions and contact sheets but no MP4. A separate native render job encodes the ready version without an LLM call. Preview still incurs the storyboard, audio, frame and verification costs; no fixed speedup is guaranteed.
+
+## 3. Pipeline contract
+
+`src/ports/pipeline.ts` defines the canonical `Pipeline` interface:
+
+- `id`, `version`, `specSchema`, `sceneOptionsSchema`.
+- `catalog()` and `prompt(ctx)` for build/revise/resume/approval continuation.
+- `parseResult(finalText, workdir, {requireVideo})`.
+- `omp()` supplies skill directories and environment.
+- `prepareRevision(fromProjectDir, toWorkdir)` copies sources and rewrites embedded packet paths.
+- `render(projectDir, signal?)` encodes a preview natively.
+
+The HyperFrames implementation, prompt templates, custom skill, and helper scripts live together under `src/pipelines/hyperframes-explainer/`. Worker rules are a section of `omp-video-pipeline/SKILL.md`, not a separate skill. Upstream skills are not edited. The pipeline pins `hyperframes@0.8.82`.
+
+## 4. HTTP API
+
+Every endpoint except `/v1/health` requires bearer authentication. Errors are `{"error":{"code":"…","message":"…"}}`. JSON bodies are limited to 1 MiB; raw asset uploads to 200 MiB.
+
+| Method + path | Current behavior |
 |---|---|
-| **Project** | `id` (slug), `name`, `pipeline`, `spec` (pipeline-specific look: style/format/voice/…), `brief`, `brand` {logoAsset, colors, fonts}, `timeline` {order[], transitions, bgm?}, `createdAt` |
-| **Scene** | `id` (`<project>:<n>`), `n`, `title`, `topic`, `brief`, `durationSec`, `assetRefs[]`, `findAssets`, `currentVersion` |
-| **Version** | `id`, `sceneId` (or none for standalone videos), `number` (1,2,…), `parentVersion`, `jobId`, `workdir`, `outputs` {video, contactSheet, captionsVtt, thumbnail}, `durationSec`, `createdAt` |
-| **Asset** | `id`, `projectId`, `name`, `kind` (image/video/audio/font/other), `bytes`, `sha256`, `origin` (upload/ai-found), `source`, `license`, `tags[]` |
-| **Job** | `id`, `kind`, `pipeline`, `state`, `input` (validated), `metadata` (opaque, echoed in webhooks), `limits` {maxMinutes, maxUsd}, `attempts`, `usage` {usd, tokens, phases}, `error` {code, message}, timestamps |
-| **Event** | append-only: `jobId`, `type`, `at`, `data`. Drives webhooks and the audit trail |
+| `GET /v1/health` | Health, running/queued counts, webhook pending/dead counts or disabled |
+| `GET /v1/catalog` | All registered pipeline catalogs |
+| `POST /v1/videos` | Creates `{project,scene,job,version}` for a one-off build |
+| `POST/GET /v1/projects` | Create/list projects |
+| `GET/PATCH/DELETE /v1/projects/:id` | Inspect/update/remove a project; GET includes scenes/versions/assets |
+| `POST /v1/projects/:id/scenes` | Creates a scene without starting production |
+| `GET/DELETE /v1/scenes/:id` | Inspect/remove a scene; GET includes versions |
+| `POST /v1/scenes/:id/build` | Queues a build |
+| `POST /v1/scenes/:id/revise` | Requires instructions; accepts frames, durationSec, fromVersionId and job options |
+| `POST /v1/scenes/:id/use` | Selects a ready version with `{versionId}` |
+| `GET /v1/versions/:id` | Version details |
+| `POST /v1/versions/:id/render` | Native render of an unrendered ready version |
+| `POST /v1/projects/:id/assets?name=&tags=&source=&license=` | Raw upload; content deduplication by SHA-256 |
+| `GET /v1/projects/:id/assets` | Lists project assets |
+| `DELETE /v1/projects/:id/assets/:aid` | Removes an asset and its scene references |
+| `PUT /v1/projects/:id/timeline` | Updates complete order and cut/fade transitions |
+| `POST /v1/projects/:id/stitch` | Joins current rendered versions in timeline order |
+| `GET /v1/jobs?state=&project=&limit=` | Lists jobs |
+| `GET /v1/jobs/:id?events=1` | Job, related version, optional persisted events |
+| `POST /v1/jobs/:id/approve` | Continues a waiting job with optional notes |
+| `POST /v1/jobs/:id/cancel` | Cancels a nonterminal job |
 
-A standalone video (no project) is an implicit one-scene project, so there is a single code path.
+`src/http/routes.ts` contains the exact request schemas. Job submissions accept metadata, echoed in webhooks. The quick video endpoint uses the default pipeline; explicit pipeline selection is available when creating a project.
 
-## 3. Job state machine
+## 5. Runner, storage and artifacts
+
+Concurrency is configurable, default one. Queued jobs are FIFO; there is no cheap-job priority lane. omp runs in its own process group. Cancel sends SIGTERM to that group, with SIGKILL after the grace period.
+
+Usage is summed over all `sessions/**/*.jsonl`, including workers. The app polls usage and elapsed time for omp jobs and fails exceeded budgets with `limit_exceeded`; it does not pass `--max-time` to omp. Native render/stitch cancellation uses AbortSignal.
+
+SQLite (`<dataDir>/bridge.db`, WAL) is the source of truth. Files live under:
+
+```text
+<dataDir>/projects/<project-id>/
+  assets/<sanitized-name>
+  assets/found/                         # optional sourced files and SOURCES.md
+  scenes/<scene-id>/v<number>/          # omp cwd, sessions, logs, pipeline project
+  final/final.mp4
 ```
-queued ──start──▶ running ──ok──▶ succeeded
-  │                 │ ├─needs_approval─▶ awaiting_approval ──approve──▶ queued (phase 2)
-  │                 │ │                         └──reject/timeout──▶ cancelled
-  │                 │ ├─error──▶ failed
-  │                 │ ├─refused (e.g. revise needs restructure)──▶ rejected
-  │                 │ └─bridge crash──▶ interrupted ──resume (≤2)──▶ queued
-  └──cancel──▶ cancelled ◀──cancel── running / awaiting_approval / interrupted
-```
-- Only `app/transition(job, event)` changes state. Illegal transitions throw, and unit tests cover them.
-- `interrupted` → `queued` with `resume=true`. The runner then uses `omp --continue`. After more than 2 attempts the job ends `failed` with `code=resume_exhausted`.
-- Limits: `maxMinutes` (passed as `omp --max-time`) and `maxUsd` (the runner sums session usage live and cancels on breach) → `failed` with `code=limit_exceeded`.
-- **Approval (P1, in v2 scope):** a build job with `approve: "storyboard"` stops after the storyboard, script and preset are written, emits `approval.required` with a storyboard preview, and waits. `POST /v1/jobs/:id/approve {notes?}` resumes the same session, with the notes applied before the frames are built.
-- **Preview:** a build with `render: false` stops after verify, which produces the contact sheet. Rendering later is `POST /v1/versions/:id/render`, a cheap job with no LLM frames.
 
-## 4. Pipeline plugin interface
-```ts
-interface Pipeline {
-  id: string;                                   // "hyperframes-explainer"
-  version: string;
-  specSchema: ZodType;                          // project/scene look
-  sceneSchema: ZodType;                         // per-scene input
-  catalog(): Promise<Catalog>;                  // styles, voices, formats… (GET /v1/catalog)
-  prompt(kind: "build"|"revise"|"resume"|"approve-continue"|"render", ctx: PromptCtx): string;
-  parseResult(finalText: string, workdir: string): Result;   // zod-validated; outputs must exist
-  omp: { skills: string[]; skillDirs: string[] };           // what the overlay loads
-  prepareRevision(fromWorkdir, toWorkdir): void;            // copy + fix embedded paths
-}
-```
-- Core never mentions HyperFrames: presets, Kokoro, fonts and packets live under `pipelines/hyperframes-explainer/`.
-- Scenes in one project must share a pipeline and format, so they stitch. A later version may allow mixing pipelines with re-encoding.
+Version records point to the pipeline's rendered video/contact sheets; no copied `outputs/` tree or `current` symlink is maintained. Published media/caption outputs and approval documents are made readable (`0644`) for Hermes's different UID. Private sessions/config files are not included in that permission change.
 
-## 5. HTTP API (`/v1`, JSON, Bearer auth)
-Errors are always `{"error":{"code":"…","message":"…","details":{}}}`. The OpenAPI spec is generated from the zod schemas and served at `GET /v1/openapi.json`.
+Stitch uses FFmpeg re-encoding. Hard cut is the default; `fade` on an incoming scene applies an up-to-0.5s video/audio crossfade. Every timeline scene must have a current rendered version.
 
-| Method + path | Purpose |
-|---|---|
-| `GET /v1/health` | version, pipeline versions, skill versions, queue depth |
-| `GET /v1/catalog?pipeline=` | pipelines and their options (replaces `/styles`) |
-| `POST /v1/videos` | quick one-scene video → `{projectId, sceneId, jobId}` |
-| `POST /v1/projects` · `GET /v1/projects` · `GET/PATCH/DELETE /v1/projects/:id` | projects |
-| `POST /v1/projects/:id/scenes` · `PATCH/DELETE /v1/scenes/:id` | scenes (creating one queues a build unless `build:false`) |
-| `POST /v1/scenes/:id/revise` `{instructions?, frames?, durationSec?}` | revise the current version → new version |
-| `GET /v1/scenes/:id/versions` · `POST /v1/scenes/:id/current {version}` | history, rollback |
-| `POST /v1/projects/:id/timeline` `{order, transitions?, bgm?}` | order and transitions |
-| `POST /v1/projects/:id/stitch` | stitch job → `final.mp4` (+ `.vtt`) |
-| `POST /v1/projects/:id/assets?name=&kind=&tags=` (raw body) · `GET` · `DELETE /v1/assets/:id` | assets |
-| `GET /v1/jobs?state=&project=` · `GET /v1/jobs/:id` · `GET /v1/jobs/:id/events` · `GET /v1/jobs/:id/logs?tail=` | jobs |
-| `POST /v1/jobs/:id/cancel` · `POST /v1/jobs/:id/approve` · `POST /v1/jobs/:id/retry` | control |
-| `POST /v1/versions/:id/render` | render a preview version |
+`tools/import-v1.ts` imports finished v1 job chains as projects/scenes/versions without moving original files. It does not import legacy project manifests or unfinished jobs. Keep the old video directory mounted if imported versions are still used.
 
-Every create call accepts `metadata` (≤ 4 KB), for example `{"platform":"telegram","chatId":"…"}`. It is echoed in every webhook for that job.
+## 6. Hermes webhooks and deployment
 
-## 6. Webhooks → Hermes
-- Target: a Hermes webhook route (`hermes webhook subscribe omp-video …`), with the platform enabled in the Hermes config. The bridge config holds `webhook.url` and `webhook.secret`.
-- Signing: HMAC-SHA256 of the body. The header format must match what Hermes expects; check it before implementation.
-- Delivery: at-least-once. Retries with backoff (10s, 1m, 5m, 30m) are persisted in `outbox`. Each event carries an `eventId` for dedupe.
+Hermes listens on port 8644, published on host loopback. `deploy/config.example.json` points the bridge to `http://127.0.0.1:8644/webhooks/omp-video`. The bridge itself binds the pinned Docker network gateway for container access.
 
-| Event | When | Hermes handling |
-|---|---|---|
-| `job.started` | runner starts | deliver-only (optional, off by default) |
-| `approval.required` | storyboard ready | agent + skill: send the preview and ask to approve/change |
-| `version.published` | scene version ready | deliver-only: sheet + video, with ids |
-| `job.failed` / `job.rejected` / `job.cancelled` | terminal | agent + skill: explain and offer the next step |
-| `stitch.finished` | final.mp4 ready | deliver-only: final + project id |
+Signing: `X-Webhook-Signature-V2` is hex HMAC-SHA256 over `<timestamp>.<body>`, with `X-Webhook-Timestamp` and stable `X-Request-ID` delivery identity. Transactional outbox delivery is at-least-once, with retry backoff 10s / 1m / 5m / 30m, then dead.
 
-Payload: `{eventId, type, at, job:{id,kind,state}, project:{id,name}, scene:{id,n,title}, version:{id,number,outputs}, error?, metadata}`. Paths are given both as host paths and as container paths (`/videos/…`).
+Events: `job.started`, `job.awaiting_approval`, `job.succeeded`, `job.failed`, `job.rejected`, `job.cancelled`, `job.resumed`. Successful build/revise/render/stitch jobs all use `job.succeeded`.
 
-## 7. Storage layout
-- **SQLite** (`data/bridge.db`, WAL) is the source of truth: tables `projects, scenes, versions, assets, jobs, events, outbox`, with numbered SQL migrations.
-- **Files**: `data/projects/<project>/`
-  - `assets/<sha256-prefix>-<name>`, and `assets/found/SOURCES.md`
-  - `scenes/<NN>-<slug>/v<k>/`: the pipeline workdir (the omp cwd, sessions, logs)
-  - `scenes/<NN>-<slug>/current` → symlink to `v<k>/outputs`
-  - `final/final.mp4`, `final/final.vtt`
-- Hermes mounts `data/projects` read-only at `/videos`.
-- Migration: a one-off script imports the v1 `omp-videos/*/job.json` and `projects/*` as projects, versions and jobs, then leaves the old dirs untouched.
+Payload: `{event_type,event_id,at,job:{id,kind,state,refs,usage,error,result,phase,attempts},metadata}`. Webhook paths are rewritten using `containerMount`; HTTP responses retain host paths.
 
-## 8. Runner
-- Concurrency is configurable (default 1). FIFO, with priority for cheap job kinds (stitch, render, captions revise).
-- Spawns `omp -p --mode json --session-dir <workdir>/sessions --config <overlay> --cwd <workdir> [--continue] --max-time <m>` in its own process group. Cancel sends SIGTERM to the group, then SIGKILL after 10s.
-- Cost: the orchestrator's `message_end` usage is only part of the bill; frame workers run as subagents with their own session files under `sessions/`. The runner therefore sums `usage.cost.total` over every `*.jsonl` in the sessions dir (a v1 audit showed workers dominate token count). Streams stdout into the event log and extracts the final JSON through `pipeline.parseResult`.
-- On start, `running` jobs → `interrupted` → resume. Queued jobs keep their order.
+The owner explicitly grants `terminal`, `file`, and `skills` only to the authenticated `omp-video` route. A notification is not approval. The custom Hermes skill uses authenticated curl to inspect jobs/documents, and `/opt/hermes/bin/hermes send --to telegram --json` for real MP4/contact-sheet attachments. Sender warnings identify partial failures even when `success:true`.
 
-## 9. Code layout
-```
-src/core/        entities, state machine, events (pure)
-src/app/         use-cases (createVideo, addScene, revise, cancel, approve, stitch, publishVersion, resumeInterrupted)
-src/ports/       Store, Runner, Pipeline, Notifier, Blob
-src/adapters/    store-sqlite, runner-omp, notifier-webhook, blob-fs, stitch-ffmpeg
-src/pipelines/hyperframes-explainer/  spec, catalog, prompts/*.md, result, revision, skills/ (omp-video-pipeline, worker-rules, scripts/)
-src/http/        routes (thin), zod→openapi, errors, auth
-src/config.ts    one JSON file (BRIDGE_CONFIG) plus env overrides, validated with zod; every path defaults from $HOME
-test/unit · test/integration (fake-omp binary emitting scripted JSON, tmp dirs, :memory: sqlite)
-deploy/          systemd unit, install.sh (install unit, sync the Hermes skill, register the Hermes webhook)
-docs/            SPEC.md, API (generated), CHANGELOG.md
-hermes-skill/omp-video/   written against /v1 + catalog; no duplicated option lists
-```
-Stack: TypeScript on Node 22 (tsx for dev, tsc build), zod, built-in `node:sqlite` (no native build; replaces better-sqlite3), node:http with a small router (no framework), vitest.
+`deploy/install.sh` installs/restarts the systemd unit only. Hermes skill copying, Docker port/mount configuration and webhook registration are separate operations; there is no automatic skill-version handshake in the installer.
 
-## 10. Skills
-| Layer | Location | Rule |
-|---|---|---|
-| Hermes orchestration | `hermes-skill/omp-video` | Spec choice, API usage, identifying the video, delivery. Option lists come from `GET /v1/catalog` |
-| Pipeline procedure | `pipelines/hyperframes-explainer/skills/omp-video-pipeline` | Phases (build/revise/resume/approve/render). Paths are injected via the prompt, never hard-coded |
-| Worker rules | `…/skills/omp-video-worker-rules` | Only non-lintable rules. Each machine-checkable rule names its checker script |
-| Tools | `…/skills/*/scripts` | Fixture-tested (the regressions seen so far: TDZ, track overlap, "medjulo", symlink main guard, off-canvas) |
-| Upstream | `~/.agents/skills/*` | Never edited. Pinned `hyperframes@0.8.82`, and the version is reported by `/v1/health` |
+## 7. Verification and retained design gaps
 
-Every skill has a `version` in its front-matter. `install.sh` fails if the version the Hermes skill expects does not match the bridge's `/v1/health`.
+Live smoke evidence covers a 30s video, cancel, crash-resume/revision, a two-scene logo project with crossfade stitch, storyboard approval with reviewer notes, preview without MP4, native render, and real Telegram MP4/contact-sheet delivery. The approval/preview sample retained 11 contrast warnings; runtime/layout checks did not report errors.
 
-## 11. Milestones
-1. Scaffold: config, SQLite and migrations, core state machine and tests, fake-omp.
-2. Runner and the jobs API (build/cancel/resume/limits), plus the HyperFrames pipeline build.
-3. Revise, versions and rollback; the preview/render split; approval.
-4. Projects, scenes, assets, timeline, stitch (with transitions and bgm).
-5. Webhooks and outbox, plus Hermes webhook registration and the skill rewrite.
-6. v1 data migration, cutover (the unit points to v2), and live smoke tests: one video, one 2-scene project with a logo, one revision, one cancel, one crash-resume.
+The original design also proposed items not implemented by the current code: generated OpenAPI, separate retry/log/event endpoints, scene PATCH, background-music mixing, stitched VTT/thumbnail output, automatic brand application, cheap-job priority, retention/pruning, and complete legacy-project import. Health does not report package/pipeline/skill versions. These are explicit gaps, not features supplied by cleanup.
 
-## 12. Open questions
-- Hermes webhook header and signature format, and the port the gateway listens on (to be checked at M5).
-- Whether stitch transitions should be crossfades (re-encode) or hard cuts (stream copy) by default.
-- Retention: how long old version workdirs (sessions, frames) are kept, and whether to prune them.
+Video directories, session history and DB files are retained. Cleanup does not delete them or remove rollback history from Git.

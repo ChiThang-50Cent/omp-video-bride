@@ -1,6 +1,7 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { afterEach } from "vitest";
 import { OmpRunner } from "../../src/adapters/runner-omp/omp-runner.ts";
 import { SqliteStore } from "../../src/adapters/store-sqlite/sqlite-store.ts";
 import { App, type Deps } from "../../src/app/app.ts";
@@ -9,6 +10,18 @@ import { serve } from "../../src/http/router.ts";
 import { hyperframesExplainer } from "../../src/pipelines/hyperframes-explainer/index.ts";
 
 export const fakeOmp = resolve("test/fixtures/fake-omp.mjs");
+
+const resources: { dir: string; store: SqliteStore; app: App }[] = [];
+afterEach(async () => {
+  for (const { dir, store, app } of resources.splice(0)) {
+    try {
+      await app.stop();
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
 
 export function harness(over: Partial<Deps> = {}, usagePollMs = 50) {
   const dir = mkdtempSync(join(tmpdir(), "bridge-test-"));
@@ -22,6 +35,7 @@ export function harness(over: Partial<Deps> = {}, usagePollMs = 50) {
     config: { dataDir: join(dir, "data"), concurrency: 1, model: "m", thinking: "high", workerModel: "m", workerThinking: "medium", maxMinutes: 60, maxUsd: 5, env: {}, skillDirs: [], usagePollMs },
     ...over,
   });
+  resources.push({ dir, store, app });
   const scenario = (s: unknown) => writeFileSync(scenarioFile, JSON.stringify(s));
   return { dir, store, app, scenario, logFile, presets };
 }

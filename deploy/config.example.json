@@ -7,6 +7,6 @@
     "HYPERFRAMES_BROWSER_PATH": "/home/thangnc/.local/share/hyperframes/chrome/chrome-headless-shell-linux64/chrome-headless-shell",
     "HYPERFRAMES_PYTHON": "/home/thangnc/.local/share/hyperframes-tts/venv/bin/python"
   },
-  "webhook": { "url": "http://172.22.0.2:8644/webhooks/omp-video", "secret": "CHANGE-ME-32-chars-minimum-secret!!" },
+  "webhook": { "url": "http://127.0.0.1:8644/webhooks/omp-video", "secret": "CHANGE-ME-32-chars-minimum-secret!!" },
   "containerMount": { "host": "/home/thangnc/general/omp-videos-v2", "container": "/videos-v2" }
 }
