@@ -16,7 +16,7 @@ RUN apt-get -o Acquire::Retries=3 update && apt-get -o Acquire::Retries=3 instal
     printf '%s  %s\n' "${HERMES_ARCHIVE_SHA256}" /tmp/hermes.tar.gz | sha256sum -c - && mkdir /src && tar -xzf /tmp/hermes.tar.gz --strip-components=1 -C /src && rm /tmp/hermes.tar.gz && \
     rm -rf /src/.git /src/.github /src/apps /src/tests /src/website /src/assets /src/infographic /src/nix /src/packaging /src/plans /src/.plans /src/data /src/.hermes-docker /src/hermes-config /src/runtime /src/ui-tui/dist /src/ui-tui/packages/hermes-ink/dist /src/plugins/hermes-achievements/docs /src/flake.nix /src/flake.lock /src/.envrc /src/.gitattributes /src/.hadolint.yaml /src/.mailmap /src/log.txt /src/sqlite_leak_fix.png
 
-FROM ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df22866bd7857e5d304b67a564f4feab6ac22044dde719b AS python-deps
+FROM ghcr.io/astral-sh/uv:0.12.21-python3.13-trixie@sha256:2978ff8ce5196e8c5d3eed7c965bbda0294dde49779715106fa9da453601b295 AS python-deps
 WORKDIR /opt/hermes
 COPY --from=source /src/pyproject.toml /src/uv.lock /src/README.md ./
 RUN uv sync --frozen --no-install-project --no-dev
