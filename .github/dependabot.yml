@@ -9,6 +9,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
+  # Upstream FROM references must be literal: ARG-indirect images are not discovered.
   - package-ecosystem: docker
     directory: /deploy
     schedule:
