@@ -8,30 +8,41 @@
 //     "writeMode": 384                             // optional file mode (0600)
 //   }
 // Every invocation appends {argv, cwd, continued} to FAKE_OMP_LOG (JSONL), so tests can assert on it.
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 const argv = process.argv.slice(2);
 const flag = name => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
 const cwd = flag("--cwd") ?? process.cwd();
-// `{{cwd}}` in any string is replaced by --cwd; a `continued` object overrides fields when --continue is passed.
+const continued = argv.includes("--continue") || argv.includes("--session");
+// Explicit --session and automatic --continue both keep the existing session.
 let scenario = JSON.parse(readFileSync(process.env.FAKE_OMP_SCENARIO, "utf8").replaceAll("{{cwd}}", cwd));
-if (argv.includes("--continue") && scenario.continued) scenario = { ...scenario, ...scenario.continued };
+if (continued && scenario.continued) scenario = { ...scenario, ...scenario.continued };
+// Persist a main session before the first provider event, like real omp.
+const sessionDir = flag("--session-dir");
+const sessionFile = flag("--session") ?? (sessionDir ? join(sessionDir, "main.jsonl") : undefined);
+if (sessionFile && !existsSync(sessionFile)) {
+  if (continued && argv.includes("--session")) throw new Error("selected session is missing");
+  mkdirSync(dirname(sessionFile), { recursive: true });
+  const timestamp = new Date().toISOString();
+  writeFileSync(sessionFile, [
+    { type: "session", version: 3, id: "fake-main-session", timestamp, cwd },
+    { type: "message", id: "user-1", parentId: null, timestamp, message: { role: "user", content: [{ type: "text", text: argv.at(-1) }] } },
+  ].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+}
 
 if (process.env.FAKE_OMP_LOG) {
-  appendFileSync(process.env.FAKE_OMP_LOG, JSON.stringify({ argv, cwd, continued: argv.includes("--continue"), pid: process.pid }) + "\n");
+  appendFileSync(process.env.FAKE_OMP_LOG, JSON.stringify({ argv, cwd, continued, pid: process.pid }) + "\n");
 }
 for (const [rel, content] of Object.entries(scenario.writeFiles ?? {})) {
   const p = join(cwd, rel);
   mkdirSync(dirname(p), { recursive: true });
   writeFileSync(p, content, { mode: scenario.writeMode ?? 0o644 });
 }
-// Real omp records every assistant message (with usage) in <session-dir>/*.jsonl; the bridge sums those files.
-const sessionDir = flag("--session-dir");
 const emit = (text, usd = 0) => {
-  const line = { message: { role: "assistant", usage: { input: 100, output: 50, cost: { total: usd } } } };
-  if (sessionDir) { mkdirSync(sessionDir, { recursive: true }); appendFileSync(join(sessionDir, "main.jsonl"), JSON.stringify(line) + "\n"); }
-  console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], usage: { input: 100, output: 50, cost: { total: usd } } } }));
+  const message = { role: "assistant", content: [{ type: "text", text }], usage: { input: 100, output: 50, cost: { total: usd } } };
+  if (sessionFile) appendFileSync(sessionFile, JSON.stringify({ type: "message", message }) + "\n");
+  console.log(JSON.stringify({ type: "message_end", message }));
 };
 
 process.on("SIGTERM", () => process.exit(143));

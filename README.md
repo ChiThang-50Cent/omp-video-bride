@@ -14,9 +14,10 @@ and local directory intentionally remain `omp-video-bridge`.
 ## What is included
 
 - A bearer-authenticated `/v1` API for projects, scenes, versions, assets,
-  timeline stitching, and jobs.
-- A SQLite-backed job state machine with crash recovery, approval gates,
-  native render/stitch steps, and an at-least-once signed webhook outbox.
+  timeline stitching, and jobs, including explicit manual job resumption.
+- A SQLite-backed job state machine with bounded automatic crash recovery,
+  approval gates, native render/stitch steps, and an at-least-once signed
+  webhook outbox.
 - The `hyperframes-explainer` pipeline and its checked-in worker skill.
 - Portable host systemd installation and offline stopped-data backup/restore
   tools.
@@ -81,13 +82,12 @@ result. Do not point a development process at a production `dataDir`; use an
 isolated directory and loopback port.
 
 ## Deployment
-
 - [Docker onboarding](docs/SETUP.md#docker-onboarding): prerequisites, isolated
   state, provider/model setup, Telegram configuration and readiness checks.
 - [Isolated host quickstart](docs/SETUP.md#safe-isolated-quickstart) and
   [host systemd installation](docs/SETUP.md#host-systemd-deployment).
 - [Video API and Telegram usage](docs/USAGE.md): approval, preview/native render,
-  revisions, cancellation and output retrieval.
+  revisions, explicit manual resumption, cancellation and output retrieval.
 - [Operations](docs/OPS.md): updates, backup/restore, rollback and troubleshooting.
 
 ## Maintenance and security

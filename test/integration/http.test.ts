@@ -101,6 +101,36 @@ describe("http", () => {
   });
 });
 
+describe("manual resume endpoint", () => {
+  it("accepts a bounded resume request and returns the existing job", async () => {
+    const h = harness();
+    const { call } = await boot(h);
+    h.scenario({ final: "not-json" });
+    const created = await call("POST", "/v1/videos", { topic: "HTTP continuation" });
+    await h.app.idle();
+    expect(h.app.job(created.json.job.id).state).toBe("failed");
+
+    h.scenario(okScenario());
+    const resumed = await call("POST", `/v1/jobs/${created.json.job.id}/resume`, { limits: { maxMinutes: 20 } });
+    expect(resumed.status).toBe(200);
+    expect(resumed.json.job.id).toBe(created.json.job.id);
+    await h.app.idle();
+    expect(h.app.job(created.json.job.id).state).toBe("succeeded");
+  });
+
+  it("validates resume limits before dispatching", async () => {
+    const h = harness();
+    const { call } = await boot(h);
+    h.scenario({ final: "not-json" });
+    const created = await call("POST", "/v1/videos", { topic: "Invalid continuation limit" });
+    await h.app.idle();
+    const bad = await call("POST", `/v1/jobs/${created.json.job.id}/resume`, { limits: { maxMinutes: 241 } });
+    expect(bad.status).toBe(400);
+    expect(h.app.job(created.json.job.id).state).toBe("failed");
+    expect(h.store.listEvents(created.json.job.id).map(e => e.type)).not.toContain("manual_resume");
+  });
+});
+
 describe("revise and versions", () => {
   it("revises from the current version into a new workdir, keeps the old one, and can roll back", async () => {
     const h = harness();

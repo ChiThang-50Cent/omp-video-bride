@@ -13,7 +13,7 @@ export interface WebhookConfig {
 
 const NAMES: Partial<Record<JobEvent["type"], string>> = {
   start: "job.started", need_approval: "job.awaiting_approval", succeed: "job.succeeded", fail: "job.failed",
-  reject: "job.rejected", cancel: "job.cancelled", resume: "job.resumed",
+  reject: "job.rejected", cancel: "job.cancelled", resume: "job.resumed", manual_resume: "job.resumed",
 };
 
 export function eventName(job: Job, event: JobEvent): string | undefined {

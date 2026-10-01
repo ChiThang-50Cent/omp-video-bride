@@ -75,7 +75,15 @@ export function hyperframesExplainer(opts: HyperframesOptions = {}): Pipeline {
     },
 
     prompt(ctx: PromptCtx): string {
-      if (ctx.kind === "resume") return read("resume.md");
+      if (ctx.kind === "resume") {
+        return renderTemplate(read("resume.md"), {
+          phase: ctx.job.phase,
+          approve: ctx.flags.approve ?? "none",
+          render: String(ctx.flags.render),
+          projectDir: ctx.projectDir ?? "(discover from the existing workdir)",
+          notes: ctx.approvalNotes?.trim() || "(none)",
+        });
+      }
       if (ctx.kind === "approve-continue") return renderTemplate(read("approve-continue.md"), { notes: ctx.approvalNotes?.trim() || "(none)" });
       const spec = specSchema.parse(ctx.project.spec);
       const brief = [

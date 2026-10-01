@@ -18,16 +18,22 @@ kept under the external state directory, not in Git.
 A build or revision invokes the configured `omp`/LLM provider and can consume
 paid provider usage. The `limits.maxUsd` and `limits.maxMinutes` fields are
 bridge-side usage/time checks: they are not a provider billing cap or a promise
-that no provider work happens before a limit is observed. The `render:false`
-preview still runs the storyboard, narration, frames, and verification steps;
-it only omits the final MP4 render. Native rendering of a ready preview does not
-make another LLM call.
+that no provider work happens before a limit is observed. Usage and tokens stay
+cumulative across continuation; if cumulative USD has exhausted the old
+`maxUsd`, an explicit manual resume must supply a higher **total** USD limit.
+There is no hard provider billing cap supplied by this bridge. Native rendering
+and stitching use FFmpeg only and do not invoke omp/LLM.
 
-A notification, webhook, or Telegram progress message is **not** approval. Do
-not answer a notification by approving, resubmitting, or starting another paid
-job. Submit, approve, revise, and cancel only after an explicit user decision.
-If a request or response is lost, use `GET /v1/jobs/<job-id>` with the saved ID
-before doing anything else.
+The `render:false` preview still runs the storyboard, narration, frames, and
+verification steps; it only omits the final MP4 render. Native rendering of a
+ready preview does not make another LLM call.
+
+A notification, webhook, or Telegram progress message is **not** approval and
+is not authorization to resume. Do not answer a notification by approving,
+resubmitting, resuming, or starting another paid job. Submit, approve, revise,
+cancel, and manually resume only after an explicit user decision. If a request
+or response is lost, use `GET /v1/jobs/<job-id>` with the saved ID before doing
+anything else.
 
 The repository's verification boundary is explicit: Docker packaging/health
 checks have not performed a paid live provider turn or an actual Telegram send.
@@ -84,7 +90,9 @@ non-default style.
 
 Initialize these before either workflow. Preview/native rendering requires only
 section 1 and section 3; it does not require submitting the approval example.
-
+The manual-resume tutorial below reuses this same token-safe `bridge_api`
+helper and `poll_job`; it never asks you to paste a bearer token or create a
+fresh submission.
 ```bash
 poll_job() {
   local id="$1" label="$2" max="${3:-240}" i=0 file state
@@ -99,7 +107,7 @@ poll_job() {
         return 0
         ;;
       interrupted)
-        echo 'job is interrupted; the bridge may resume it automatically; do not resubmit' >&2
+        echo 'job is interrupted; automatic recovery may requeue it (at most two attempts); do not resubmit' >&2
         return 0
         ;;
       queued|running)
@@ -538,13 +546,134 @@ jq '{id: .job.id, kind: .job.kind, state: .job.state, error: .job.error}' \
 poll_job "$REVISE_JOB_ID" revise-after-cancel 240
 ```
 
-Cancelling a build/revision leaves its pending version failed; do not revise a
-cancelled build. Cancelling an approval-waiting build is the supported way to
-decline it. There is no `POST /reject` user endpoint: `rejected` is a pipeline
-outcome (for example, an unsupported restructure), not a command to fabricate
-in a client.
+Cancelling a build/revision leaves its pending version failed. Do not create a
+new revision or fresh build automatically; if the user later explicitly wants
+to continue the same cancelled, failed, or interrupted job, use the manual
+resume procedure below after its guards pass. Cancelling an approval-waiting
+build is the supported way to decline it. There is no `POST /reject` user
+endpoint: `rejected` is a pipeline outcome (for example, an unsupported
+restructure), not a command to fabricate in a client.
 
-## 6. Using the bot through Telegram
+## 6. Explicitly resume one saved job
+
+Manual resume is a user-authorized continuation, not a retry button. It is
+allowed for the same `build`, `revise`, `render`, or `stitch` job when its
+saved state is `failed`, `cancelled`, or `interrupted`. It keeps the same job,
+project, scene, version, inputs, metadata, phase, approval notes, and history.
+For build/revise it reuses the original workdir/main session; render requires
+the original ready preview/project directory with no video; stitch rechecks the
+current timeline/scenes. It never creates a fresh submission or silently
+chooses a new session. For `build` and `revise`, this is an explicit **paid
+continuation**; native `render` and `stitch` continuation uses FFmpeg and does
+not invoke omp.
+
+Only run the following after the user has explicitly named the saved job and
+authorized continuation. A failure notification, `job.failed` webhook, or
+Telegram message is not that authorization. This example reuses the
+token-safe `bridge_api` and `poll_job` helpers from section 1; it does not
+print, export, or paste a bearer token.
+
+```bash
+# Set this from a saved submit/GET response; never guess an ID.
+: "${JOB_ID:?set JOB_ID to the exact saved job ID}"
+RESUME_BEFORE="$CLIENT_DIR/manual-resume-before.json"
+bridge_api "$BRIDGE_URL/v1/jobs/$JOB_ID?events=1" > "$RESUME_BEFORE"
+
+JOB_STATE=$(jq -er '.job.state' "$RESUME_BEFORE")
+JOB_KIND=$(jq -er '.job.kind' "$RESUME_BEFORE")
+case "$JOB_STATE" in
+  failed|cancelled|interrupted) ;;
+  *) echo "manual resume is not allowed from state: $JOB_STATE" >&2; exit 1 ;;
+esac
+case "$JOB_KIND" in
+  build|revise|render|stitch) ;;
+  *) echo "unexpected job kind: $JOB_KIND" >&2; exit 1 ;;
+esac
+
+# Keep the IDs, refs, current usage, and existing limits visible for the
+# explicit decision. Do not edit refs or use a newer version by guessing.
+jq '{
+  id: .job.id, kind: .job.kind, state: .job.state, refs: .job.refs,
+  phase: .job.phase, approvalNotes: .job.approvalNotes,
+  usage: .job.usage, limits: .job.limits,
+  manual_resume_events: [(.events // [])[] | select(.type == "manual_resume")]
+}' "$RESUME_BEFORE"
+
+read -r -p "Type RESUME to authorize continuing this exact $JOB_KIND job (paid for build/revise): " CONFIRM
+[ "$CONFIRM" = RESUME ] || { echo "not authorized; no request sent" >&2; exit 1; }
+
+# Empty limits reuses both old limits. The endpoint validates the body before
+# changing state. This is still paid work for build/revise.
+printf '{}\n' > "$CLIENT_DIR/manual-resume-request.json"
+
+# If cumulative usage has exhausted the old USD limit, do not lower it or
+# pretend it is a fresh budget. Replace the body with a higher TOTAL (1..50):
+# TOTAL_USD=10
+# jq -n --argjson total "$TOTAL_USD" \
+#   '{limits: {maxUsd: $total}}' > "$CLIENT_DIR/manual-resume-request.json"
+#
+# To replace only the time limit, use a positive total <= 240 minutes:
+# jq -n '{limits: {maxMinutes: 120}}' > "$CLIENT_DIR/manual-resume-request.json"
+# Native render/stitch jobs keep maxUsd: 0; do not add maxUsd to their body.
+
+bridge_api -X POST "$BRIDGE_URL/v1/jobs/$JOB_ID/resume" \
+  -H 'Content-Type: application/json' \
+  --data-binary @"$CLIENT_DIR/manual-resume-request.json" \
+  > "$CLIENT_DIR/manual-resume-response.json"
+jq -e --arg id "$JOB_ID" '.job.id == $id' \
+  "$CLIENT_DIR/manual-resume-response.json" >/dev/null
+jq '{id: .job.id, kind: .job.kind, state: .job.state, phase: .job.phase,
+     usage: .job.usage, limits: .job.limits}' \
+  "$CLIENT_DIR/manual-resume-response.json"
+
+# Poll the same ID. This GET-only helper never submits a replacement.
+poll_job "$JOB_ID" manual-resume 240
+bridge_api "$BRIDGE_URL/v1/jobs/$JOB_ID?events=1" \
+  > "$CLIENT_DIR/manual-resume-after.json"
+jq '{
+  id: .job.id, state: .job.state, usage: .job.usage, error: .job.error,
+  result: .job.result,
+  manual_resume_events: [(.events // [])[] | select(.type == "manual_resume")]
+}' "$CLIENT_DIR/manual-resume-after.json"
+```
+
+The endpoint returns `200 {job}` with the same ID when accepted. Limits are
+optional and each supplied field replaces only that field: `maxMinutes` is
+positive and at most 240, while `maxUsd` is positive and at most 50. The time
+window is fresh **only for manual resume** (`startedAt` is reset before the
+next start); usage and tokens remain cumulative. A higher USD value is a higher
+total limit, not an amount added to prior spend, and the bridge cannot hard-cap
+provider billing or in-flight usage. Polling and finalization cannot decrease
+persisted USD or token totals. Preserve the worker/session usage logs needed to
+account cumulative totals; if persisted totals exceed those logs, manual resume
+is rejected before mutation rather than silently starting a new job.
+
+The endpoint validates before mutation. `409 not_resumable` means the job is
+queued, running, awaiting approval, succeeded, or rejected. For an existing
+job, `409 resume_unavailable` covers missing or mismatched project, scene,
+version, timeline, revision parent, newer ready version, required omp
+workdir/main session, or incomplete persisted usage history. An unknown job ID
+retains normal `not_found`. `409 budget_exhausted` means cumulative USD has
+reached the effective total; `409 job_busy` means the target is locally
+running; `409 scene_busy` means another job is active on the scene; `409
+project_busy` means a project stitch or other project work conflicts; and
+`409 already_rendered` means a native render already has a video. Invalid
+limits or a USD edit on native render/stitch returns `400 invalid_request`.
+All of these guards leave state, history, versions, and outbox unchanged.
+Deleted references, ready-version overwrites, conflicting work, incomplete
+usage logs, and stale render/timeline inputs are guards, not reasons to submit
+a fresh job. Build/revise restores the existing pending/failed version with
+notes cleared; stitch rechecks and reruns the **current** timeline/scenes.
+
+The persisted `manual_resume` event records the explicit API action. The
+`job.resumed` webhook reports continuation for that action; automatic restart
+recovery can also report `job.resumed`, but is limited to two attempts and keeps
+the original time window. Neither event is approval or an instruction to
+submit, retry, or resume another job. If polling reaches its local bound,
+inspect the saved response and poll the same ID later; never fall back to a
+fresh `POST /v1/videos`, build, revise, render, or stitch.
+
+## 7. Using the bot through Telegram
 
 This section is for the **person requesting a video**, not for configuring the
 agent. The agent-only skill is
@@ -579,6 +708,34 @@ The bot should confirm the chosen spec and return a job ID/scene ID/version ID
 (or quote the message that contains them). A build may queue behind other work;
 there is no guaranteed completion time. Do not promise a fixed number of minutes
 without a current benchmark and provider availability.
+
+### Explicit manual resume requests
+
+If an existing job is `failed`, `cancelled`, or `interrupted`, manual
+continuation requires a new, explicit user instruction naming its exact job
+ID. A safe request is:
+
+> Resume the same job `job_…` (do not create a fresh submission). I authorize
+> paid continuation for this build/revise job. Reuse its limits.
+
+If the old USD total is exhausted, name a higher **total** explicitly:
+
+> Resume `job_…` with a total `maxUsd` of 10 and the existing time limit. Do
+> not reset or hide cumulative usage.
+
+The bot must inspect the saved job and confirm its kind (`build`, `revise`,
+`render`, or `stitch`) and state before calling `/v1/jobs/<id>/resume`. It must
+not call this endpoint for `queued`, `running`, `awaiting_approval`, succeeded,
+or rejected jobs, and must not fall back to a new `/videos`, build, revise,
+render, or stitch request. Build/revise continuation may incur provider cost;
+native render/stitch does not invoke omp. Deleted references, ready-version
+overwrites, missing sessions, and conflicting current work remain guards.
+
+An automatic `job.resumed` notification after bridge restart is different: it
+reports bounded crash recovery (at most two attempts, original time window)
+and requires no user action. A `manual_resume` history event plus the same
+`job.resumed` webhook identifies an explicit continuation. Neither notification
+is approval or authorization to resume another job.
 
 ### Approval, changes, and cancellation
 
@@ -619,8 +776,11 @@ and job lifecycle events include `job.started`, `job.awaiting_approval`,
 `job.resumed`. On success, the bot can deliver the MP4 and contact sheet(s),
 with the project/scene/version IDs in the caption so a later reply targets the
 right video. On failure, it should report the job error code/message and not
-silently resubmit. `job.resumed` means the bridge recovered an interrupted job;
-it is not a request for approval or a reason to start another job.
+silently resubmit. `job.resumed` may report bounded automatic recovery after a
+restart or an explicitly authorized manual continuation; inspect the saved
+job/history to distinguish them. It is not a request for approval or a reason
+to start another job. The persisted `manual_resume` event records only the
+explicit manual API action.
 
 Delivery depends on the configured Hermes route, Telegram credentials, and
 readability of the `/videos-v2` read-only mount. A sender may report partial
@@ -629,7 +789,7 @@ bot should identify which artifact was actually delivered. Timing is not
 guaranteed: queue depth, provider work, CPU rendering, network/font downloads,
 and Telegram availability all affect completion.
 
-## 7. Troubleshooting and contract links
+## 8. Troubleshooting and contract links
 
 - **401:** use the `bridge_api` helper and confirm the Docker bootstrap created
   `$OMP_VIDEO_STATE_DIR/secrets/bridge-token`; do not paste the token into a
@@ -657,11 +817,13 @@ POST /v1/videos                         -> {project, scene, job, version}
 GET  /v1/jobs/:id                       -> {job, version, events?}
 POST /v1/jobs/:id/approve               -> {job}
 POST /v1/jobs/:id/cancel                -> {job}
+POST /v1/jobs/:id/resume                -> {job}
 POST /v1/scenes/:id/revise              -> {job, version}
 GET  /v1/versions/:id                   -> {version}
 POST /v1/versions/:id/render            -> {job}
-```
 
 These examples do not change runtime code or dependency pins. Lifecycle
-requests mutate persistent job/project state; build, revision and approval
-continuation can invoke paid provider work when the reader explicitly runs them.
+requests mutate persistent job/project state; build, revision, approval
+continuation, and an explicitly authorized manual resume can invoke paid
+provider work when the reader explicitly runs them. Native render/stitch work
+does not invoke omp.

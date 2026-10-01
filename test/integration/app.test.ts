@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { App } from "../../src/app/app.ts";
@@ -78,6 +78,7 @@ describe("approval gate", () => {
     const { job } = h.app.createVideo({ topic: "Gate me" }, { approve: "storyboard" });
     await h.app.idle();
     expect(h.app.job(job.id).state).toBe("awaiting_approval");
+    expect(() => h.app.resume(job.id)).toThrowError(expect.objectContaining({ code: "not_resumable", status: 409 }));
     h.app.approve(job.id, "make scene 2 shorter");
     await h.app.idle();
     expect(h.app.job(job.id).state).toBe("succeeded");
@@ -105,6 +106,162 @@ describe("crash recovery", () => {
     const calls = readFileSync(h.logFile, "utf8").trim().split("\n").map(l => JSON.parse(l));
     expect(calls.at(-1).continued).toBe(true);
     expect(calls.at(-1).argv.at(-1)).toContain("interrupted");
+  });
+});
+
+describe("manual resume", () => {
+  it("resumes a failed build with the same job/version and cumulative usage", async () => {
+    const h = harness();
+    h.scenario({ final: "not-json" });
+    const created = h.app.createVideo({ topic: "Manual continuation" });
+    await h.app.idle();
+    const failed = h.app.job(created.job.id);
+    const failedVersion = h.app.version(created.version.id);
+    expect(failed.state).toBe("failed");
+    expect(failedVersion.state).toBe("failed");
+    expect(existsSync(join(failedVersion.workdir, "sessions", "main.jsonl"))).toBe(true);
+
+    h.scenario(okScenario());
+    const queued = h.app.resume(failed.id, { maxMinutes: 20, maxUsd: 4 });
+    expect(queued.id).toBe(failed.id);
+    expect(queued.refs).toEqual(failed.refs);
+    expect(queued.resumes).toBe(failed.resumes);
+    expect(queued.startedAt).toBeNull();
+    expect(h.app.version(created.version.id).state).toBe("pending");
+    await h.app.idle();
+
+    const done = h.app.job(failed.id);
+    expect(done.state).toBe("succeeded");
+    expect(done.refs).toEqual(failed.refs);
+    expect(done.result).toMatchObject({ versionId: created.version.id });
+    expect(done.usage.usd).toBeGreaterThanOrEqual(failed.usage.usd);
+    expect(h.app.version(created.version.id).jobId).toBe(failedVersion.jobId);
+    expect(h.store.listEvents(failed.id).map(e => e.type)).toContain("manual_resume");
+  });
+
+  it("rejects a missing pinned session without mutating the job, version, or history", async () => {
+    const h = harness();
+    h.scenario({ final: "not-json" });
+    const created = h.app.createVideo({ topic: "Missing continuation" });
+    await h.app.idle();
+    const beforeJob = h.app.job(created.job.id);
+    const beforeVersion = h.app.version(created.version.id);
+    const beforeEvents = h.store.listEvents(created.job.id);
+    rmSync(join(beforeVersion.workdir, "sessions", "main.jsonl"));
+
+    expect(() => h.app.resume(created.job.id)).toThrowError(expect.objectContaining({ code: "resume_unavailable", status: 409 }));
+    expect(h.app.job(created.job.id)).toEqual(beforeJob);
+    expect(h.app.version(created.version.id)).toEqual(beforeVersion);
+    expect(h.store.listEvents(created.job.id)).toEqual(beforeEvents);
+  });
+
+  it("refuses to resume a revision whose copied project directory was lost", async () => {
+    const h = harness();
+    h.scenario(okScenario());
+    const original = h.app.createVideo({ topic: "Preserve revision progress" });
+    await h.app.idle();
+    h.scenario({ final: "not-json" });
+    const revision = h.app.reviseScene(original.scene.id, { instructions: "Change the existing scene" });
+    await h.app.idle();
+    const beforeJob = h.app.job(revision.job.id);
+    const beforeVersion = h.app.version(revision.version.id);
+    const beforeEvents = h.store.listEvents(revision.job.id);
+    rmSync(beforeVersion.projectDir!, { recursive: true });
+
+    expect(() => h.app.resume(revision.job.id)).toThrowError(expect.objectContaining({ code: "resume_unavailable", status: 409 }));
+    expect(h.app.job(revision.job.id)).toEqual(beforeJob);
+    expect(h.app.version(revision.version.id)).toEqual(beforeVersion);
+    expect(h.store.listEvents(revision.job.id)).toEqual(beforeEvents);
+  });
+
+  it("rejects a session with incomplete persisted usage history", async () => {
+    const h = harness();
+    h.scenario({ steps: [{ text: "spent", usd: 0.2 }], final: "not-json" });
+    const created = h.app.createVideo({ topic: "Incomplete usage history" });
+    await h.app.idle();
+    const failedVersion = h.app.version(created.version.id);
+    const session = join(failedVersion.workdir, "sessions", "main.jsonl");
+    writeFileSync(session, readFileSync(session, "utf8").split("\n").filter(line => !line.includes('"usage"')).join("\n"));
+    const before = h.store.listEvents(created.job.id);
+
+    expect(() => h.app.resume(created.job.id)).toThrowError(expect.objectContaining({ code: "resume_unavailable", status: 409 }));
+    expect(h.store.listEvents(created.job.id)).toEqual(before);
+    expect(h.app.job(created.job.id).state).toBe("failed");
+  });
+
+  it("requires a higher total budget after cumulative cost reaches the old limit", async () => {
+    const h = harness();
+    h.scenario({ steps: [{ text: "spent", usd: 0.25 }], final: "not-json" });
+    const created = h.app.createVideo({ topic: "Budget continuation" }, { limits: { maxUsd: 0.25 } });
+    await h.app.idle();
+    expect(h.app.job(created.job.id).usage.usd).toBeCloseTo(0.25);
+    expect(() => h.app.resume(created.job.id)).toThrowError(expect.objectContaining({ code: "budget_exhausted", status: 409 }));
+
+    h.scenario(okScenario());
+    const resumed = h.app.resume(created.job.id, { maxUsd: 1 });
+    expect(resumed.limits.maxUsd).toBe(1);
+    await h.app.idle();
+    expect(h.app.job(created.job.id).usage.usd).toBeGreaterThanOrEqual(0.25);
+  });
+
+  it("manually resumes a failed native render without allowing USD edits", async () => {
+    const h = harness();
+    h.scenario({ writeFiles: { "videos/demo/caption_groups.json": "[]" }, final: '```json\n{"video":"","project_dir":"{{cwd}}/videos/demo","duration_s":20}\n```' });
+    const created = h.app.createVideo({ topic: "Native render continuation" }, { render: false });
+    await h.app.idle();
+    const pipe = h.app.d.pipelines["hyperframes-explainer"]!;
+    pipe.render = async () => { throw new Error("first render failure"); };
+    const render = h.app.renderVersion(created.version.id);
+    await h.app.idle();
+    expect(h.app.job(render.id).state).toBe("failed");
+    expect(() => h.app.resume(render.id, { maxUsd: 1 })).toThrowError(expect.objectContaining({ code: "invalid_request", status: 400 }));
+
+    pipe.render = async projectDir => {
+      const video = join(projectDir, "renders/video.mp4");
+      mkdirSync(join(projectDir, "renders"), { recursive: true });
+      writeFileSync(video, "rendered");
+      return { video, durationSec: 20 };
+    };
+    const resumed = h.app.resume(render.id);
+    expect(resumed.limits.maxUsd).toBe(0);
+    await h.app.idle();
+    expect(h.app.job(render.id).state).toBe("succeeded");
+    expect(h.app.version(created.version.id).outputs.video).toMatch(/video\.mp4$/);
+  });
+
+  it("manually resumes a failed stitch against the current timeline", async () => {
+    let fail = true;
+    const order: string[][] = [];
+    const h = harness({
+      stitch: async (_project, scenes, outDir) => {
+        if (fail) {
+          fail = false;
+          throw new Error("first stitch failure");
+        }
+        order.push(scenes.map(s => s.scene.title));
+        const video = join(outDir, "final.mp4");
+        writeFileSync(video, "stitched");
+        return { video, durationSec: 40 };
+      },
+    });
+    const project = h.app.createProject({ name: "Resume stitch" });
+    const first = h.app.addScene(project.id, { title: "First", topic: "First scene" });
+    const second = h.app.addScene(project.id, { title: "Second", topic: "Second scene" });
+    h.scenario(okScenario());
+    h.app.buildScene(first.id);
+    await h.app.idle();
+    h.scenario(okScenario());
+    h.app.buildScene(second.id);
+    await h.app.idle();
+    const stitch = h.app.stitch(project.id);
+    await h.app.idle();
+    expect(h.app.job(stitch.id).state).toBe("failed");
+    h.app.setTimeline(project.id, { order: [second.id, first.id] });
+    const resumed = h.app.resume(stitch.id);
+    expect(resumed.limits.maxUsd).toBe(0);
+    await h.app.idle();
+    expect(h.app.job(stitch.id).state).toBe("succeeded");
+    expect(order).toEqual([["Second", "First"]]);
   });
 });
 

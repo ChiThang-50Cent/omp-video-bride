@@ -5,6 +5,8 @@ export interface RunOptions {
   prompt: string;
   /** Continue the omp session stored in workdir/sessions instead of starting a new one. */
   resume: boolean;
+  /** Explicit main-session file selected for an operator-requested resume. */
+  sessionFile?: string;
   model: string;
   thinking: string;
   workerModel: string;
@@ -23,6 +25,8 @@ export interface RunHandle {
 
 export interface Runner {
   start(opts: RunOptions): RunHandle;
+  /** Finds a main session, or validates an already pinned file without falling back. */
+  sessionToResume(workdir: string, sessionFile?: string): string | null;
   /** Total usage of the orchestrator and all subagents in this workdir. */
   usage(workdir: string): Usage;
 }

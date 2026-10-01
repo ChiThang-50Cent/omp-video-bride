@@ -94,5 +94,8 @@ export function buildRouter(app: App, store: Store, health: () => Record<string,
   });
   r.route("POST", "/v1/jobs/:id/approve", ({ params, body }) => ({ job: app.approve(params.id!, body.notes) }), { schema: z.object({ notes: z.string().max(4000).optional() }) });
   r.route("POST", "/v1/jobs/:id/cancel", ({ params, body }) => ({ job: app.cancel(params.id!, body.reason) }), { schema: z.object({ reason: z.string().optional() }) });
+  r.route("POST", "/v1/jobs/:id/resume", ({ params, body }) => ({ job: app.resume(params.id!, body.limits) }), {
+    schema: z.object({ limits: Limits }),
+  });
   return r;
 }

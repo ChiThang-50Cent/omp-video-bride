@@ -38,6 +38,11 @@ export interface Limits { maxMinutes?: number; maxUsd?: number }
 export interface JobOptions { metadata?: Record<string, unknown>; limits?: Limits; approve?: "storyboard" | null; render?: boolean }
 
 interface BuildInput { versionId: string; instructions?: string; frames?: number[]; durationSec?: number | null; flags: { approve: "storyboard" | null; render: boolean } }
+interface ResumePreparation {
+  sessionFile?: string;
+  usage?: Job["usage"];
+  version?: Version;
+}
 
 const id = (prefix: string) => `${prefix}_${randomBytes(4).toString("hex")}`;
 
@@ -129,7 +134,6 @@ export class App {
     for (const state of ACTIVE_JOB_STATES) jobs.push(...this.d.store.listJobs({ projectId: pid, state, limit: -1 }));
     return jobs;
   }
-
   /** Imported v1 versions point outside this tree and must never be removed by scene deletion. */
   private ownsVersionWorkdir(pid: string, sid: string, workdir: string): boolean {
     const root = resolve(this.projectDir(pid), "scenes", sid);
@@ -209,7 +213,7 @@ export class App {
   }
 
   private busyScene(scene: Scene): void {
-    const busy = this.activeJobs(scene.projectId).find(j => j.refs.sceneId === scene.id);
+    const busy = this.activeJobs(scene.projectId).find(j => j.kind === "stitch" || j.refs.sceneId === scene.id);
     if (busy) throw conflict("scene_busy", `scene has active job ${busy.id} (${busy.state})`);
   }
 
@@ -290,6 +294,139 @@ export class App {
     const j = this.apply(jid, { type: "approve", notes });
     void this.pump();
     return j;
+  }
+
+  private prepareManualResume(job: Job, limits?: Limits): ResumePreparation {
+    if (!["failed", "cancelled", "interrupted"].includes(job.state)) {
+      throw conflict("not_resumable", `job is ${job.state}`);
+    }
+    if (this.running.has(job.id)) {
+      throw conflict("job_busy", "job is still running locally");
+    }
+    if (limits) {
+      if (limits.maxMinutes !== undefined && (!Number.isFinite(limits.maxMinutes) || limits.maxMinutes <= 0 || limits.maxMinutes > 240)) {
+        throw invalid("maxMinutes must be positive and at most 240");
+      }
+      if (limits.maxUsd !== undefined && (!Number.isFinite(limits.maxUsd) || limits.maxUsd <= 0 || limits.maxUsd > 50)) {
+        throw invalid("maxUsd must be positive and at most 50");
+      }
+      if ((job.kind === "render" || job.kind === "stitch") && limits.maxUsd !== undefined) {
+        throw invalid("native jobs do not accept maxUsd resume edits");
+      }
+    }
+
+    const projectId = job.refs.projectId;
+    const project = projectId ? this.d.store.getProject(projectId) : undefined;
+    if (!project || project.pipeline !== job.pipeline) {
+      throw conflict("resume_unavailable", "the job's project is missing or no longer matches");
+    }
+    const active = this.activeJobs(project.id).filter(j => j.id !== job.id);
+
+    if (job.kind === "stitch") {
+      if (active.length) throw conflict("project_busy", "project has other active work");
+      if (!project.timeline.order.length) throw conflict("resume_unavailable", "project timeline is empty");
+      const seen = new Set<string>();
+      for (const sceneId of project.timeline.order) {
+        if (seen.has(sceneId)) throw conflict("resume_unavailable", "project timeline contains duplicate scenes");
+        seen.add(sceneId);
+        const scene = this.d.store.getScene(sceneId);
+        if (!scene || scene.projectId !== project.id || !scene.currentVersionId) {
+          throw conflict("resume_unavailable", "project timeline references a missing or unselected scene");
+        }
+        const version = this.d.store.getVersion(scene.currentVersionId);
+        if (!version || version.sceneId !== scene.id || version.state !== "ready" || !version.outputs.video || !existsSync(version.outputs.video)) {
+          throw conflict("resume_unavailable", "project timeline has a scene without a current rendered video");
+        }
+      }
+      return {};
+    }
+
+    const sceneId = job.refs.sceneId;
+    const versionId = job.refs.versionId;
+    const scene = sceneId ? this.d.store.getScene(sceneId) : undefined;
+    const version = versionId ? this.d.store.getVersion(versionId) : undefined;
+    if (!scene || scene.projectId !== project.id || !version || version.sceneId !== scene.id) {
+      throw conflict("resume_unavailable", "the job's scene or version is missing or no longer belongs to its project");
+    }
+    const input = job.input;
+    const inputVersionId = typeof input === "object" && input !== null && "versionId" in input ? input.versionId : undefined;
+    if (inputVersionId !== version.id) {
+      throw conflict("resume_unavailable", "the job's version reference is inconsistent");
+    }
+    if (active.some(j => j.kind === "stitch")) {
+      throw conflict("project_busy", "project stitch is active");
+    }
+    const sceneBusy = active.find(j => j.refs.sceneId === scene.id);
+    if (sceneBusy) throw conflict("scene_busy", `scene has active job ${sceneBusy.id} (${sceneBusy.state})`);
+
+    // A newer ready version makes this failed attempt stale; never roll it back over current work.
+    const newerReady = this.d.store.listVersions(scene.id).some(v => v.number > version.number && v.state === "ready");
+    if (newerReady) throw conflict("resume_unavailable", "a newer ready version already exists");
+
+    if (job.kind === "build" || job.kind === "revise") {
+      if (version.jobId !== job.id || (version.state !== "pending" && version.state !== "failed")) {
+        throw conflict("resume_unavailable", "the build version is not an owned pending or failed version");
+      }
+      if (!existsSync(version.workdir)) {
+        throw conflict("resume_unavailable", "the original build workdir is missing");
+      }
+      if (job.kind === "revise") {
+        if (!version.projectDir || !existsSync(version.projectDir)) {
+          throw conflict("resume_unavailable", "the original revised project directory is missing");
+        }
+        if (!version.parentVersionId) throw conflict("resume_unavailable", "the revision parent is missing");
+        const parent = this.d.store.getVersion(version.parentVersionId);
+        if (!parent || parent.sceneId !== scene.id || parent.state !== "ready" || !parent.projectDir || !existsSync(parent.projectDir)) {
+          throw conflict("resume_unavailable", "the revision parent is missing or no longer ready");
+        }
+      }
+      const sessionFile = this.d.runner.sessionToResume(version.workdir, job.sessionFile);
+      if (!sessionFile) {
+        throw conflict("resume_unavailable", "the original main session is missing");
+      }
+      const observed = this.d.runner.usage(version.workdir);
+      if (observed.usd < job.usage.usd || observed.inputTokens < job.usage.inputTokens || observed.outputTokens < job.usage.outputTokens) {
+        throw conflict("resume_unavailable", "usage history is incomplete; refusing to resume without full cumulative accounting");
+      }
+      const usage = {
+        usd: observed.usd,
+        inputTokens: observed.inputTokens,
+        outputTokens: observed.outputTokens,
+      };
+      const effectiveMaxUsd = limits?.maxUsd ?? job.limits.maxUsd;
+      if (usage.usd >= effectiveMaxUsd) {
+        throw conflict("budget_exhausted", `cumulative cost $${usage.usd.toFixed(2)} has reached the $${effectiveMaxUsd} limit`);
+      }
+      return { sessionFile, usage, version };
+    }
+
+    if (job.kind === "render") {
+      if (version.state !== "ready" || !version.projectDir || !existsSync(version.projectDir)) {
+        throw conflict("resume_unavailable", "the original preview is missing or no longer ready");
+      }
+      if (version.outputs.video) throw conflict("already_rendered", "version already has a video");
+      return { version };
+    }
+
+    throw conflict("resume_unavailable", "job kind cannot be resumed");
+  }
+
+  resume(jid: string, limits?: Limits): Job {
+    const resumed = this.d.store.tx(() => {
+      const current = this.job(jid);
+      const prep = this.prepareManualResume(current, limits);
+      if (prep.version && (current.kind === "build" || current.kind === "revise")) {
+        this.d.store.putVersion({ ...prep.version, state: "pending", notes: null });
+      }
+      return this.apply(jid, {
+        type: "manual_resume",
+        sessionFile: prep.sessionFile,
+        limits,
+        usage: prep.usage,
+      });
+    });
+    void this.pump();
+    return resumed;
   }
 
   cancel(jid: string, reason?: string): Job {
@@ -395,7 +532,7 @@ export class App {
     mkdirSync(join(this.assetsDir(project.id), "found"), { recursive: true });
     const om = pipeline.omp();
     const handle = this.d.runner.start({
-      workdir: version.workdir, prompt: pipeline.prompt(ctx), resume: queued.resume,
+      workdir: version.workdir, prompt: pipeline.prompt(ctx), resume: queued.resume, sessionFile: queued.sessionFile,
       model: this.d.config.model, thinking: this.d.config.thinking, workerModel: this.d.config.workerModel, workerThinking: this.d.config.workerThinking,
       skillDirs: [...om.skillDirs, ...this.d.config.skillDirs], env: { ...this.d.config.env, ...om.env },
     });
@@ -490,6 +627,7 @@ export class App {
   // ------------------------------------------------------------- stitch
   stitch(pid: string, o: JobOptions = {}): Job {
     const project = this.project(pid);
+    if (this.activeJobs(pid).length) throw conflict("project_busy", "project has active work");
     const missing = project.timeline.order.map(sid => this.scene(sid)).filter(s => !s.currentVersionId || !this.version(s.currentVersionId).outputs.video);
     if (!project.timeline.order.length) throw conflict("empty_timeline", "project has no scenes");
     if (missing.length) throw conflict("scenes_not_ready", `scenes without a rendered video: ${missing.map(s => s.n).join(", ")}`);
@@ -501,6 +639,7 @@ export class App {
   }
 
   private async executeStitch(job: Job, entry: { abort: AbortController; cancelled?: string }): Promise<void> {
+    // Stitch resumes intentionally rerun the current timeline, not a stale snapshot from job creation.
     const project = this.project(job.refs.projectId!);
     const scenes = project.timeline.order.map(sid => { const scene = this.scene(sid); return { scene, version: this.version(scene.currentVersionId!) }; });
     const versions = Object.fromEntries(scenes.map(s => [s.scene.id, s.version.id]));

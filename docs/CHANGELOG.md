@@ -1,11 +1,14 @@
 # Changelog
 
-## Unreleased — documentation
+## Unreleased
 
 - Add end-to-end Docker onboarding with separate omp/Hermes authentication, explicit bridge model selection, private configuration helpers, UID/file-bind reload guidance and a health-versus-readiness boundary.
-- Add a human-facing API/Telegram usage guide covering saved IDs, storyboard approval, preview/native render, artifact paths, revisions, cancellation and best-effort budgets (including approval waiting).
-- Expand Docker operations with stopped app/support backups, mounted recovery helpers, controlled capabilities, force-recreation, rollback/schema boundaries, preserved path namespaces and troubleshooting. Runtime, dependencies, pins and HTTP APIs are unchanged.
+- Add a human-facing API/Telegram usage guide covering saved IDs, storyboard approval, preview/native render, artifact paths, revisions, cancellation, explicit manual resume, and best-effort budgets (including approval waiting).
+- Add authenticated manual resume for all four job kinds from `failed`, `cancelled`, or `interrupted`, with same-job identity, guard checks, cumulative usage, accepted replacement limits, `manual_resume` history, and `job.resumed` webhook semantics. Automatic crash recovery remains capped at two attempts with the original time window; native render/stitch never invoke omp.
+- Expand Docker operations with stopped app/support backups, mounted recovery helpers, controlled capabilities, force-recreation, rollback/schema boundaries, preserved path namespaces and troubleshooting. Pinned upstream runtime versions and dependencies are unchanged.
 - Move detailed host/Docker setup into `docs/SETUP.md`, keep the README as a concise entry point, and update onboarding/configuration links.
+- Condense the self-contained Hermes skill into action tables and short checklists; remove duplicated preset/guard catalogs and polling scripts while retaining approval/resume authorization, budget rules, artifact paths and Telegram delivery safeguards.
+- Verified locally with Node 22.22.3: typecheck, 74 tests, isolated HTTP continuation for all four job kinds, real FFmpeg media, and signed webhook delivery. Independent probes covered failed-after-approval continuation, changed timeline order, fresh-clock expiry, guard/outbox atomicity, and queued history loss. OMP used a fixture; no paid provider call, actual HyperFrames render, Telegram send, or production rollout was performed.
 
 ## 2.0.2 - 2026-09-30
 
@@ -41,7 +44,7 @@ Full rewrite in TypeScript. The running service uses v2; v1 sources remain avail
 - Core job state machine (pure), SQLite store with migrations, `Pipeline` plugin port; HyperFrames explainer is the first pipeline.
 - `/v1` API: videos, projects, scenes, versions (revise, rollback), assets (sha256 dedupe), timeline, stitch (ffmpeg, cut or 0.5 s crossfade), jobs (approve, cancel).
 - Storyboard approval gate and cheap preview (`render:false`) with a native render job.
-- Crash recovery: jobs `running` at startup are resumed with `omp --continue` (max 2), cost summed over all session files, limits per job.
+- Crash recovery: jobs `running` at startup can be recovered at most twice using the original session and time window; usage is summed over all session files and limits remain per job.
 - Webhooks: transactional outbox, HMAC `X-Webhook-Signature-V2`, backoff 10 s / 1 m / 5 m / 30 m, then dead.
 - Skill paths are injected through the prompt; the skill lives with the pipeline (`src/pipelines/hyperframes-explainer/skills`).
 - `tools/import-v1.ts` imports finished v1 jobs.

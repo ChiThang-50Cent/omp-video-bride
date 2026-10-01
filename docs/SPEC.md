@@ -33,11 +33,17 @@ Host production uses `deploy/omp-video-bridge.service`, which starts `src/main.t
 
 States: `queued`, `running`, `awaiting_approval`, `interrupted`, `succeeded`, `failed`, `rejected`, `cancelled`. Transitions are implemented in `src/core/job.ts`; illegal transitions throw.
 
-Running omp jobs left by a bridge restart become interrupted and are requeued with `omp --continue`. Automatic crash resumes are limited to two. Approval continuation uses the same session without consuming a crash resume.
+Automatic crash recovery applies only to an omp job left `running` by a bridge restart. The bridge may recover it at most two times, using the original omp session and the **original** `maxMinutes` clock. Automatic recovery does not reset limits and is distinct from an explicit manual resume. Approval continuation uses the same session without consuming an automatic crash-resume slot.
 
-Build approval (`approve:"storyboard"`) stops after the storyboard/script/preset, before audio and frames. The job waits until approved or cancelled; there is no automatic approval timeout. Reviewer notes are applied before production continues.
+Manual recovery is an authenticated `POST /v1/jobs/:id/resume` for an existing `build`, `revise`, `render`, or `stitch` job in `failed`, `cancelled`, or `interrupted`. It is never inferred from a webhook, notification, or failed-job poll, and it never creates a replacement job or falls back to a fresh session. The same job ID, references, version, workdir, input, metadata, phase, approval notes, and history are retained. A new persisted `manual_resume` event records the explicit action; the continuation emits `job.resumed` and exposes `resumeReason:"manual"` in the job response. Manual resume does not increment the automatic-recovery count.
 
-The waiting state has no automatic timeout, but `maxMinutes` counts elapsed wall-clock time from the original job start, including approval waiting. Approval does not reset it; a late continuation can fail at the next limit check after beginning provider work. Choose a submission time limit that includes review time and do not automatically resubmit.
+Before any mutation, manual resume requires the target job to be absent from the local running map and no conflicting scene/project work (a stitch conflicts with any work in its project), and revalidates that all referenced project, scene, version, timeline, and current rendered inputs still exist and belong together. For build/revise the original workdir and main session must exist; revise also requires its original copied project directory. Render requires the original ready preview with a project directory and no video; stitch revalidates and reruns the **current** project timeline/scenes, not a stale snapshot. A deleted reference or ready version is not resurrected or overwritten. Build/revise restore the existing pending/failed version and clear its notes without copying a revise parent. Missing required build/revise directories/session data returns `resume_unavailable`; other invalid or conflicting requests are rejected without state, event, version, or outbox mutation.
+
+The optional resume body is `{limits?: {maxMinutes?: positive number <= 240, maxUsd?: positive number <= 50}}`. Omitted fields reuse the old limit; supplied fields replace only those fields. A manual resume clears terminal error/result/finishedAt and resets `startedAt` to null so its next start opens a fresh time window. Usage and tokens remain cumulative: if cumulative USD has exhausted the old `maxUsd`, an explicit higher **total** `maxUsd` is required; lowering it cannot erase prior spend. `maxUsd` remains a bridge-side watcher, not a hard provider billing cap. Native render and stitch keep `maxUsd: 0`, reject USD edits with `invalid_request`, never invoke omp/LLM work, and do not add a native time watcher.
+
+Build approval (`approve:"storyboard"`) stops after the storyboard/script/preset, before audio and frames. The job waits until approved or cancelled; there is no automatic approval timeout. Reviewer notes are applied before production continues, and an approval continuation remains in the approved phase.
+
+The approval waiting state has no automatic timeout, but its **automatic** recovery clock remains the original job start and includes approval waiting. Manual resume is the only path that opens a fresh time window. A late approval or continuation can fail at the next watcher check after beginning provider work; choose a limit that includes review time and never automatically resubmit a paid request.
 
 Build preview (`render:false`) produces frame compositions and contact sheets but no MP4. A separate native render job encodes the ready version without an LLM call. Preview still incurs the storyboard, audio, frame and verification costs; no fixed speedup is guaranteed.
 
@@ -81,14 +87,25 @@ Every endpoint except `/v1/health` requires an explicit `Authorization: Bearer <
 | `GET /v1/jobs/:id?events=1` | Job, related version, optional persisted events |
 | `POST /v1/jobs/:id/approve` | Continues a waiting job with optional notes |
 | `POST /v1/jobs/:id/cancel` | Cancels a nonterminal job |
+| `POST /v1/jobs/:id/resume` | Explicitly resumes a failed, cancelled, or interrupted build/revise/render/stitch job; optional `{limits:{maxMinutes,maxUsd}}`; returns `{job}` |
 
-`src/http/routes.ts` contains the exact request schemas. Job submissions accept metadata, echoed in webhooks. The quick video endpoint uses the default pipeline; explicit pipeline selection is available when creating a project.
+`src/http/routes.ts` contains the exact request schemas. Job submissions accept metadata, echoed in webhooks. The quick video endpoint uses the default pipeline; explicit pipeline selection is available when creating a project. Resume requests are authenticated and validate limits before mutation: `maxMinutes` is positive and at most 240, `maxUsd` is positive and at most 50, and native render/stitch jobs reject USD edits with `invalid_request`. `not_resumable` covers queued, running, awaiting-approval, succeeded, and rejected jobs. For an existing job, missing or mismatched project/scene/version references use `resume_unavailable`; an unknown job ID retains the normal `not_found` behavior. Conflicting or stale ready/current inputs are rejected without mutation.
+
+Resume guard errors are returned before any state/event/version/outbox change:
+`409 resume_unavailable` for missing or mismatched project/scene/version/timeline,
+revision parent, newer ready version, original workdir/main session, or
+incomplete persisted usage history; `409 budget_exhausted` when cumulative USD
+has reached the effective total; `409 job_busy` for a locally running target;
+`409 scene_busy` for other active work on the same scene; `409 project_busy` for
+an active project stitch or other project conflict; and `409 already_rendered`
+when a native render already has a video. Native USD edits are `400
+invalid_request`.
 
 ## 5. Runner, storage and artifacts
 
 Concurrency is configurable, default one. Queued jobs are FIFO; there is no cheap-job priority lane. omp runs in its own process group. Cancel sends SIGTERM to that group, with SIGKILL after the grace period.
 
-Usage is summed over all `sessions/**/*.jsonl`, including workers. The app polls reported usage and elapsed time for omp jobs (default interval 15 seconds) and fails exceeded budgets with `limit_exceeded`; it does not pass `--max-time` to omp. `maxUsd` is not a hard provider spend cap: unreported/in-flight usage and polling delay can overshoot it. Hermes provider usage is separate. Native render/stitch cancellation uses AbortSignal.
+Usage is summed over all `sessions/**/*.jsonl`, including workers, and persisted usage/tokens are cumulative across automatic and manual continuation. The app polls reported usage and elapsed time for omp jobs (default interval 15 seconds) and fails exceeded budgets with `limit_exceeded`; it does not pass `--max-time` to omp. `maxUsd` is not a hard provider spend cap: unreported/in-flight usage and polling delay can overshoot it. A manual resume may replace a limit only within the accepted bounds and requires a higher **total** USD limit when cumulative usage has exhausted the old one; it never reduces saved usage. Polling and finalization cannot decrease persisted USD or token totals. Preserve the worker/session usage logs needed to account those totals; incomplete history is rejected before mutation rather than silently starting a new job. Hermes provider usage is separate. Native render/stitch cancellation uses AbortSignal.
 
 SQLite (`<dataDir>/bridge.db`, WAL) is the source of truth. Files live under:
 
@@ -104,7 +121,7 @@ Version records point to the pipeline's rendered video/contact sheets; no copied
 
 Project/scene deletion refuses queued, running, awaiting-approval and interrupted work without a history-size cap. Scene deletion also refuses active project stitches, cleans owned version directories and timeline references, and preserves imported external workdirs and terminal job/event history. Scene/version/timeline changes invalidate the previous final output. Asset uploads deduplicate by hash and disambiguate colliding names; staged writes/deletes compensate database failures.
 
-Stitch uses FFmpeg re-encoding. Hard cut is the default; `fade` on an incoming scene applies an up-to-0.5s video/audio crossfade. Every timeline scene must have a current rendered version.
+Stitch uses native FFmpeg re-encoding and never invokes omp/LLM. Hard cut is the default; `fade` on an incoming scene applies an up-to-0.5s video/audio crossfade. Every timeline scene must have a current rendered version. A manual stitch resume revalidates and reruns the current timeline/scenes at execution time.
 
 `tools/import-v1.ts` imports finished v1 job chains as projects/scenes/versions without moving original files. It does not import legacy project manifests or unfinished jobs. Keep the old video directory mounted if imported versions are still used.
 
@@ -114,7 +131,7 @@ Host systemd deployments normally bind the bridge to loopback. The host example 
 
 Signing: `X-Webhook-Signature-V2` is hex HMAC-SHA256 over `<timestamp>.<body>`, with `X-Webhook-Timestamp` and stable `X-Request-ID` delivery identity. Transactional outbox delivery is at-least-once, with retry backoff 10s / 1m / 5m / 30m, then dead.
 
-Events: `job.started`, `job.awaiting_approval`, `job.succeeded`, `job.failed`, `job.rejected`, `job.cancelled`, `job.resumed`. Successful build/revise/render/stitch jobs all use `job.succeeded`.
+Events: `job.started`, `job.awaiting_approval`, `job.succeeded`, `job.failed`, `job.rejected`, `job.cancelled`, `job.resumed`. The persisted API event list (`GET /v1/jobs/:id?events=1`) records `manual_resume` for an explicit authenticated manual-resume call; `job.resumed` is the webhook continuation notice for manual or automatic recovery. It is not approval and never asks a consumer to submit another job. Successful build/revise/render/stitch jobs all use `job.succeeded`.
 
 Payload: `{event_type,event_id,at,job:{id,kind,state,refs,usage,error,result,phase,attempts},metadata}`. Webhook paths are rewritten using `containerMount`; HTTP responses retain host paths.
 

@@ -38,10 +38,12 @@ export interface Job {
   attempts: number;
   /** Number of automatic resumes after an interruption. */
   resumes: number;
-  /** True when the next start must continue the existing omp session. */
+  /** True for continuation: omp reuses its session; native jobs rerun their stage. */
   resume: boolean;
-  /** Why the session continues: an interruption (crash/restart) or a passed approval gate. */
-  resumeReason: "crash" | "approval" | null;
+  /** Why the session continues: crash/restart, operator request, or a passed approval gate. */
+  resumeReason: "crash" | "manual" | "approval" | null;
+  /** Explicit main-session file selected for a manual resume, when available. */
+  sessionFile?: string;
   /** Links to the entities this job works on. */
   refs: { projectId?: string; sceneId?: string; versionId?: string };
   /** Reviewer notes from the approval gate, applied when the job continues. */
@@ -67,6 +69,7 @@ export type JobEvent =
   | { type: "approve"; notes?: string }
   | { type: "interrupt" }
   | { type: "resume" }
+  | { type: "manual_resume"; sessionFile?: string; limits?: Partial<Job["limits"]>; usage?: Usage }
   | { type: "usage"; usage: Usage };
 
 export class IllegalTransition extends Error {
@@ -87,11 +90,11 @@ const ALLOWED: Record<JobState, Partial<Record<EventType, true>>> = {
   queued: { start: true, cancel: true },
   running: { succeed: true, fail: true, reject: true, cancel: true, need_approval: true, interrupt: true, usage: true },
   awaiting_approval: { approve: true, cancel: true },
-  interrupted: { resume: true, cancel: true, fail: true },
+  interrupted: { resume: true, cancel: true, manual_resume: true },
   succeeded: {},
-  failed: {},
+  failed: { manual_resume: true },
   rejected: {},
-  cancelled: {},
+  cancelled: { manual_resume: true },
 };
 
 export function newJob(init: {
@@ -141,7 +144,11 @@ export function transition(job: Job, event: JobEvent, now: string): Job {
       next.startedAt = job.startedAt ?? now;
       break;
     case "usage":
-      next.usage = event.usage;
+      next.usage = {
+        usd: Math.max(job.usage.usd, event.usage.usd),
+        inputTokens: Math.max(job.usage.inputTokens, event.usage.inputTokens),
+        outputTokens: Math.max(job.usage.outputTokens, event.usage.outputTokens),
+      };
       break;
     case "need_approval":
       next.state = "awaiting_approval";
@@ -167,6 +174,26 @@ export function transition(job: Job, event: JobEvent, now: string): Job {
         next.resume = true;
         next.resumeReason = "crash";
         next.resumes = job.resumes + 1;
+      }
+      break;
+    case "manual_resume":
+      // Manual resumes deliberately bypass the automatic interruption cap and
+      // open a fresh time window without discarding cumulative usage.
+      next.state = "queued";
+      next.resume = true;
+      next.resumeReason = "manual";
+      if (event.sessionFile !== undefined) next.sessionFile = event.sessionFile;
+      next.limits = { ...job.limits, ...event.limits };
+      next.error = null;
+      next.result = null;
+      next.finishedAt = null;
+      next.startedAt = null;
+      if (event.usage) {
+        next.usage = {
+          usd: Math.max(job.usage.usd, event.usage.usd),
+          inputTokens: Math.max(job.usage.inputTokens, event.usage.inputTokens),
+          outputTokens: Math.max(job.usage.outputTokens, event.usage.outputTokens),
+        };
       }
       break;
     case "succeed":

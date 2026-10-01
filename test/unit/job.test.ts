@@ -57,6 +57,32 @@ describe("job state machine", () => {
     expect(done.resumes).toBe(0); // approval is not a crash resume
   });
 
+  it("manual resume clears terminal fields, keeps the auto counter, and opens a fresh window", () => {
+    const failed = run(
+      mk(),
+      { type: "start" },
+      { type: "usage", usage: { usd: 1.5, inputTokens: 10, outputTokens: 20 } },
+      { type: "fail", error: err },
+    );
+    const resumed = transition(failed, {
+      type: "manual_resume",
+      sessionFile: "/tmp/main.jsonl",
+      limits: { maxMinutes: 20, maxUsd: 4 },
+      usage: { usd: 1, inputTokens: 5, outputTokens: 9 },
+    }, t1);
+    expect(resumed).toMatchObject({
+      state: "queued", resume: true,
+      limits: { maxMinutes: 20, maxUsd: 4 }, resumes: 0, startedAt: null, finishedAt: null,
+      error: null, result: null, usage: { usd: 1.5, inputTokens: 10, outputTokens: 20 },
+    });
+  });
+
+  it("allows manual resume from cancelled without changing the auto counter", () => {
+    const cancelled = run(mk(), { type: "start" }, { type: "cancel" });
+    const resumed = transition(cancelled, { type: "manual_resume" }, t1);
+    expect(resumed).toMatchObject({ state: "queued", resume: true, resumes: 0, startedAt: null, error: null, result: null });
+  });
+
   it("interruption resumes up to MAX_RESUMES times, then fails with resume_exhausted", () => {
     let j = run(mk(), { type: "start" });
     for (let i = 1; i <= MAX_RESUMES; i++) {
@@ -70,9 +96,20 @@ describe("job state machine", () => {
     expect(j.finishedAt).toBe(t1);
   });
 
-  it("records usage only while running", () => {
+  it("manual resume remains available after the automatic cap without changing resumes", () => {
+    let j = run(mk(), { type: "start" });
+    for (let i = 0; i < MAX_RESUMES; i++) j = run(j, { type: "interrupt" }, { type: "resume" }, { type: "start" });
+    j = run(j, { type: "interrupt" }, { type: "resume" });
+    expect(j.state).toBe("failed");
+    const manual = transition(j, { type: "manual_resume" }, t1);
+    expect(manual).toMatchObject({ state: "queued", resume: true, resumes: MAX_RESUMES, startedAt: null, error: null });
+  });
+
+  it("records cumulative usage only while running", () => {
     const usage = { usd: 1.5, inputTokens: 10, outputTokens: 20 };
-    expect(run(mk(), { type: "start" }, { type: "usage", usage }).usage).toEqual(usage);
+    const running = run(mk(), { type: "start" }, { type: "usage", usage });
+    expect(running.usage).toEqual(usage);
+    expect(transition(running, { type: "usage", usage: { usd: 0.5, inputTokens: 4, outputTokens: 8 } }, t1).usage).toEqual(usage);
     expect(() => transition(mk(), { type: "usage", usage }, t1)).toThrow(IllegalTransition);
   });
 

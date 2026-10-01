@@ -330,8 +330,8 @@ that checkout using the explicit installer options and rerun `--check-only`.
 
 There is no automatic destructive retention policy. Before deleting anything:
 
-- ensure no job for the project is `queued`, `running`, or
-  `awaiting_approval`; cancel/drain it through the authenticated API;
+- ensure no job for the project is `queued`, `running`, `awaiting_approval`, or
+  `interrupted`; cancel/drain it through the authenticated API;
 - verify the project/version is not needed for rollback, audit, or imported-v1
   playback;
 - take a stopped backup and record the project IDs, paths, and operator;
@@ -345,6 +345,55 @@ artifact directory by age alone. Database rows, session packets, and output
 paths are coupled. If disk pressure requires emergency action, stop the
 service, preserve a backup, and make a narrowly scoped manual deletion with a
 rollback plan.
+
+## Manual job resumption
+
+Manual resumption is an explicit, authenticated continuation of the same job,
+not a generic retry. It supports `build`, `revise`, `render`, and `stitch` only
+when the saved state is `failed`, `cancelled`, or `interrupted`. A failure
+notification or webhook never authorizes it; an explicit user request can.
+Operations must not create a fresh job as a fallback.
+
+Before calling `POST /v1/jobs/<id>/resume`, inspect the exact saved ID with
+`GET /v1/jobs/<id>?events=1` and obtain explicit user authorization. Confirm
+the project/scene/version references, current version/timeline inputs, and that
+the target is absent from the local running map. For build/revise, verify the
+original workdir and main session; revise also needs its copied project
+directory. Render requires the original ready preview/project
+directory with no video; stitch revalidates its current timeline/scenes. No
+conflicting scene/project work may be active; a project stitch conflicts with
+any work in that project. Deleted references, ready-version overwrites, stale
+render inputs, and missing required data must fail closed without mutation.
+If a failed/cancelled job may be resumed later, retain its referenced records,
+workdir, and (for build/revise) main session, plus the worker/session usage
+logs used to account cumulative totals; deletion makes it unavailable and
+must not be repaired by recreating or guessing a reference.
+
+Do not edit or delete referenced workdirs, session files, or usage logs while
+the bridge/worker is live; out-of-band filesystem mutation during a job is not
+a supported recovery mechanism. Drain/stop first, then preserve the saved
+state and inspect it through the authenticated API.
+`resume_unavailable` identifies missing/mismatched project, scene, version,
+timeline, revision parent, newer ready version, required omp workdir/main
+session, or incomplete persisted usage history; an unknown job ID retains
+normal `not_found`. `budget_exhausted` means cumulative USD reached the
+effective total. `job_busy`, `scene_busy`, `project_busy`, and
+`already_rendered` identify local-target, same-scene, project, and duplicate
+native-render conflicts respectively. These are rejected before mutation.
+
+Use `{}` to reuse old limits or replace only explicitly supplied fields:
+`maxMinutes` is positive and at most 240, and `maxUsd` is positive and at most
+50. Usage/tokens remain cumulative. If cumulative USD has exhausted the old
+limit, an explicit higher **total** `maxUsd` is required; the bridge watcher
+is not a hard provider billing cap. Native render/stitch jobs keep `maxUsd: 0`,
+reject USD edits with `400 invalid_request`, never invoke omp, and do not add a
+native time watcher. Build/revise continuation can incur paid provider usage.
+
+An accepted request returns `200 {job}` with the same ID and records a
+`manual_resume` history event; the continuation emits `job.resumed`. Automatic
+restart recovery is separate: it is limited to two attempts and retains the
+original time window, while manual resume alone opens a fresh time window.
+Inspect/poll the same job ID after either event; never retry from a notification.
 
 ## Webhook dead letters and replay
 
@@ -388,7 +437,8 @@ roll back the completed video job.
    job or Telegram send. Inspect health and receiver logs after restart.
 
 Do not edit outbox rows with ad-hoc SQL or replay every dead row blindly.
-There is no separate public retry endpoint in the current API.
+Outbox redrive is separate from job continuation; `/v1/jobs/:id/resume` is the
+explicit manual-resume endpoint, not an automatic or generic retry.
 
 ## Docker isolated deployment
 
@@ -507,12 +557,15 @@ bridge_api \
 ```
 
 Re-list the queues until no work that must be preserved remains. A notification
-is not approval; do not approve or resubmit work as part of a maintenance
-operation.
+is not approval or authorization to resume; do not approve, resubmit, or resume
+work as part of a maintenance operation.
 
-On restart, queued work dispatches and interrupted/running work can recover
-automatically. Review authorization to resume any preserved nonterminal jobs
-before starting restored services; restoring a backup is not paid-work consent.
+On restart, queued work dispatches and interrupted/running omp work may recover
+automatically at most twice, using its original time window. This automatic
+recovery is distinct from manual resume. Review authorization to preserve any
+nonterminal jobs before starting restored services; a notification is not
+approval or paid-work consent. A later manual resume still requires an explicit
+user decision, the same job ID, and the guards above.
 Then stop the gateway before the worker:
 
 

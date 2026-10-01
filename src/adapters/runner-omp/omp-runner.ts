@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
-import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { closeSync, constants, createWriteStream, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { Usage } from "../../core/job.ts";
 import type { RunHandle, RunOptions, Runner } from "../../ports/runner.ts";
 
@@ -12,13 +13,86 @@ export interface OmpRunnerConfig {
   baseEnv?: NodeJS.ProcessEnv;
 }
 
+function hasMainSession(fd: number, workdir: string, buffer: Buffer): boolean {
+  const decoder = new StringDecoder("utf8");
+  let pending = "", header = false, searchFrom = 0;
+  const inspect = (line: string): boolean | null => {
+    if (!line.trim()) return null;
+    let entry: { type?: string; id?: string; cwd?: string; parentSession?: string; message?: { role?: string; content?: unknown } };
+    try { entry = JSON.parse(line); } catch { return false; }
+    if (!entry || typeof entry !== "object") return false;
+    if (entry.type === "title" && !header) return null;
+    if (!header) {
+      if (entry.type !== "session" || typeof entry.id !== "string" || !entry.id || typeof entry.cwd !== "string" ||
+          resolve(entry.cwd) !== resolve(workdir) || entry.parentSession) return false;
+      header = true;
+      return null;
+    }
+    if (entry.type === "session_init" || entry.type === "session") return false;
+    if (entry.type !== "message") return null;
+    const message = entry.message;
+    return !!message && ["user", "assistant", "toolResult"].includes(message.role ?? "") &&
+      ((typeof message.content === "string" && message.content.length > 0) ||
+       (Array.isArray(message.content) && message.content.length > 0));
+  };
+  let bytes: number;
+  while ((bytes = readSync(fd, buffer, 0, buffer.length, null)) > 0) {
+    pending += decoder.write(buffer.subarray(0, bytes));
+    let newline: number;
+    while ((newline = pending.indexOf("\n", searchFrom)) >= 0) {
+      const found = inspect(pending.slice(0, newline));
+      pending = pending.slice(newline + 1);
+      searchFrom = 0;
+      if (found !== null) return found;
+    }
+    searchFrom = pending.length;
+  }
+  pending += decoder.end();
+  return pending.length > 0 && inspect(pending) === true;
+}
+
 export class OmpRunner implements Runner {
   private readonly cfg: OmpRunnerConfig;
   constructor(cfg: OmpRunnerConfig) {
     this.cfg = cfg;
   }
 
+  sessionToResume(workdir: string, sessionFile?: string): string | null {
+    const dir = join(workdir, "sessions");
+    const pinned = sessionFile ? resolve(sessionFile) : undefined;
+    if (pinned && dirname(pinned) !== resolve(dir)) return null;
+    let entries;
+    try {
+      if (!lstatSync(workdir).isDirectory() || !lstatSync(dir).isDirectory()) return null;
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch { return null; }
+    const buffer = Buffer.allocUnsafe(16 * 1024);
+    let selected: string | null = null, newest = -Infinity;
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+      const path = join(dir, entry.name);
+      if (pinned && resolve(path) !== pinned) continue;
+      let fd: number | undefined;
+      try {
+        fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+        const stat = fstatSync(fd);
+        if (!stat.isFile() || stat.mtimeMs < newest || !hasMainSession(fd, workdir, buffer)) continue;
+        if (stat.mtimeMs > newest || selected === null || path > selected) {
+          selected = path;
+          newest = stat.mtimeMs;
+        }
+      } catch { /* Missing, unreadable or malformed sessions cannot authorize new work. */ }
+      finally { if (fd !== undefined) closeSync(fd); }
+    }
+    return selected;
+  }
+
   start(o: RunOptions): RunHandle {
+    // A job may have waited in the queue while its pinned history disappeared.
+    // omp's path-based resume can create a session at a missing path.
+    if (o.resume && o.sessionFile && !this.sessionToResume(o.workdir, o.sessionFile)) {
+      throw new Error("the pinned main session is missing or no longer valid");
+    }
     mkdirSync(o.workdir, { recursive: true });
     // Frame workers are `task` subagents: without this overlay they use the host's modelRoles.task.
     // First-event timeout: provider stalls of 12-19 min before the first token were observed;
@@ -33,7 +107,7 @@ export class OmpRunner implements Runner {
       ...(this.cfg.argvPrefix ?? []),
       "-p", "--session-dir", join(o.workdir, "sessions"), "--mode", "json",
       "--model", o.model, "--thinking", o.thinking, "--config", overlay, "--cwd", o.workdir,
-      ...(o.resume ? ["--continue"] : []),
+      ...(o.resume ? (o.sessionFile ? ["--session", o.sessionFile] : ["--continue"]) : []),
       o.prompt,
     ];
     const [cmd, ...rest] = [this.cfg.bin, ...args];

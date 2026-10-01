@@ -73,7 +73,8 @@ is not a model-access guarantee. Use Bash for the header helper, keep shell
 tracing (`set -x`) and curl verbose/trace output off, and never export a bearer
 token into the environment or put it in command arguments. The
 [Docker usage tutorial](USAGE.md) covers approval through the completed MP4,
-including preview/native-render, revise and cancel paths.
+including preview/native-render, revise, cancel, and explicit manual-resume
+paths.
 
 Stop the process with `Ctrl-C`. Do not reuse the demo data directory for a
 production service. The full request schema and state transitions are in
@@ -124,8 +125,11 @@ upgrade, backup, restore, retention, and dead-letter procedures.
 
 This checklist is for a **new** Linux/amd64 deployment. For an existing service,
 use the [Docker operations runbook](OPS.md#docker-isolated-deployment) instead;
-startup can recover queued/interrupted jobs. Do not point this recipe at live
-host/systemd data or reuse a running gateway's bot token.
+startup can dispatch queued work and automatically recover interrupted/running
+omp work at most twice using its original time window. Manual continuation of a
+failed, cancelled, or interrupted job is separate, requires an explicit user
+decision, and never falls back to a fresh submission. Do not point this recipe
+at live host/systemd data or reuse a running gateway's bot token.
 
 ### 1. Prerequisites and capacity
 
@@ -405,10 +409,16 @@ only the bridge process inside it does not remount the file. Recreate the worker
 as below to make the remount and configuration reload explicit.
 
 For LLM build/revise phases, `maxUsd`/`maxMinutes` are best-effort watcher
-thresholds, not a hard spending cap. The default usage poll is 15 seconds and
-counts provider-reported session cost; missing prices, in-flight calls and
-cancellation latency can exceed a threshold. Hermes usage is separate and not
-included. Use provider-side billing limits and account monitoring too.
+thresholds, not a hard provider spending cap. Usage and tokens remain
+cumulative across automatic/manual continuation; if cumulative USD exhausts
+the old limit, an explicit manual resume must provide a higher **total**
+`maxUsd` (positive, at most 50). Manual `maxMinutes` is positive and at most
+240 and opens a fresh time window; automatic restart recovery keeps the
+original window and is limited to two attempts. The default usage poll is 15
+seconds, and missing prices, in-flight calls, and cancellation latency can
+exceed a threshold. Hermes usage is separate and not included. Use
+provider-side billing limits and account monitoring too. Native render/stitch
+jobs do not invoke omp and keep `maxUsd: 0`.
 
 ### 8. Recreate the configured services
 
@@ -463,7 +473,7 @@ paid integration exercise, not a free readiness probe.
 
 Continue with the [copy-paste video tutorial](USAGE.md) for
 **submit → storyboard review → approve → render → MP4/contact sheets**, the
-`render:false`/native-render alternative, and revise/cancel. It also contains
-[Telegram user instructions](USAGE.md#6-using-the-bot-through-telegram).
+`render:false`/native-render alternative, revise/cancel, and explicit manual
+resume. It also contains [Telegram user instructions](USAGE.md#7-using-the-bot-through-telegram).
 For updates, backup/restore, rollback, relocation and troubleshooting, use
 the [Docker runbook](OPS.md#docker-isolated-deployment).
