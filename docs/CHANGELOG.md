@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — documentation
+
+- Add end-to-end Docker onboarding with separate omp/Hermes authentication, explicit bridge model selection, private configuration helpers, UID/file-bind reload guidance and a health-versus-readiness boundary.
+- Add a human-facing API/Telegram usage guide covering saved IDs, storyboard approval, preview/native render, artifact paths, revisions, cancellation and best-effort budgets (including approval waiting).
+- Expand Docker operations with stopped app/support backups, mounted recovery helpers, controlled capabilities, force-recreation, rollback/schema boundaries, preserved path namespaces and troubleshooting. Runtime, dependencies, pins and HTTP APIs are unchanged.
+- Move detailed host/Docker setup into `docs/SETUP.md`, keep the README as a concise entry point, and update onboarding/configuration links.
+
 ## 2.0.2 - 2026-09-30
 
 - Document the public `omp-video-bride` repository spelling while retaining the `omp-video-bridge` package name, supported Node runtimes, isolated configuration quickstart, authenticated API examples, Docker entry point, maintenance, and security disclosure guidance.
