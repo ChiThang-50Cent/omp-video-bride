@@ -1,14 +1,14 @@
 # syntax=docker/dockerfile:1.7
 # Dependency-only image. Application edits do not invalidate these stages.
-ARG UBUNTU_DIGEST=sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
+ARG UBUNTU_IMAGE=ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
 
-FROM ubuntu:24.04@${UBUNTU_DIGEST} AS runtime-inputs
+FROM ${UBUNTU_IMAGE} AS runtime-inputs
 RUN apt-get update && apt-get install -y --no-install-recommends python3.12 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY deploy/prepare-assets.py deploy/runtime-lock.json /fetch/
 RUN python3.12 /fetch/prepare-assets.py --runtime /inputs
 
-FROM ubuntu:24.04@${UBUNTU_DIGEST} AS node-deps
+FROM ${UBUNTU_IMAGE} AS node-deps
 COPY --from=runtime-inputs /inputs/node /opt/node
 ENV PATH=/opt/node/bin:$PATH
 WORKDIR /build/hyperframes
@@ -17,7 +17,7 @@ RUN --mount=type=cache,target=/root/.npm npm ci --ignore-scripts --no-audit --fu
     && npm cache add hyperframes@0.8.82 --cache /build/npm-cache --no-audit --fund=false \
     && rm -rf /build/npm-cache/_logs /build/npm-cache/_update-notifier-last-checked
 
-FROM ubuntu:24.04@${UBUNTU_DIGEST} AS whisper-builder
+FROM ${UBUNTU_IMAGE} AS whisper-builder
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential cmake ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=runtime-inputs /inputs/whisper-src /src/whisper.cpp
@@ -32,7 +32,7 @@ RUN cmake -S /src/whisper.cpp -B /build/whisper \
     && install -D /build/whisper/bin/whisper-cli /opt/whisper/bin/whisper-cli \
     && ! readelf -d /opt/whisper/bin/whisper-cli | grep -E 'RPATH|RUNPATH'
 
-FROM ubuntu:24.04@${UBUNTU_DIGEST} AS python-builder
+FROM ${UBUNTU_IMAGE} AS python-builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
        python3.12 python3.12-venv python3-pip espeak-ng libespeak-ng-dev libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
@@ -40,7 +40,7 @@ COPY deploy/requirements.worker.txt /tmp/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip python3.12 -m venv /opt/tts-venv \
     && /opt/tts-venv/bin/python -m pip install --disable-pip-version-check -r /tmp/requirements.txt
 
-FROM ubuntu:24.04@${UBUNTU_DIGEST} AS runtime
+FROM ${UBUNTU_IMAGE} AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
        python3.12 ca-certificates curl ffmpeg fonts-liberation wget xdg-utils \
        espeak-ng libespeak-ng1 libsndfile1 libgomp1 libstdc++6 \

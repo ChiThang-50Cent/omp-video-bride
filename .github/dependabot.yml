@@ -13,6 +13,12 @@ updates:
     directory: /deploy
     schedule:
       interval: weekly
+    ignore:
+      # Python 3.12 and runtime packages target Ubuntu 24.04; review OS upgrades together.
+      - dependency-name: ubuntu
+        versions: [">24.04"]
+      # This image is built by this repository, not fetched as an upstream dependency.
+      - dependency-name: omp-video-runtime
   - package-ecosystem: docker
     directory: /deploy/hermes
     schedule:
