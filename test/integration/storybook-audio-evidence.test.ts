@@ -35,7 +35,7 @@ describe("source-bound storybook audio evidence", () => {
     assert.equal(evidence.tracks.length, 2);
     for (const mode of ["voice", "music", "silence", "substitution"])
       assert.throws(() => api.verifyRenderedAudio(dir, manifest, plan, output(dir, mode)), /rendered audio/);
-  });
+  }, 20_000); // Several real FFmpeg encodes/decodes exceed Vitest's 5s default on CI.
   it("detects quiet music independently of unrelated reconstruction error", () => {
     const { dir, manifest, metadata } = fixture();
     metadata.bgm.volume = 0.003;

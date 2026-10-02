@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Give the real AAC mix/content integration case a bounded 20-second timeout: GitHub's Node 22/24 runners exceeded Vitest's default five seconds while executing its multiple FFmpeg encodes/decodes. Audio assertions and production acceptance thresholds are unchanged.
 - Fix storybook delivery to require the audited video's canonical path; compare sampled encoded frames with frame-aligned browser evidence and recheck screenshot/contact hashes, contact metadata and evidence digests at acceptance. Existing audits must be regenerated. Validate measured caption phrase coverage against authored narration.
 - Support silent and partially narrated audio timelines, retaining all beat offsets for music/alignment without requiring synthesis for silent projects. Checkpoint completed synthesis before downstream failures, normalize relative verification paths, and start deferred explainer audio after storyboard approval.
 - Verified these fixes in an isolated `omp-video-worker:2.0.2` workspace: typecheck, 122 tests, live API/webhook smoke, real Chrome preview, real Kokoro/Whisper sparse narration and overflow-cache reuse. Independent verification accepted an existing silent MP4, rejected a different delivery path, overwritten visual evidence and stale encoded artwork. No new video was rendered, paid model called or production state changed.
