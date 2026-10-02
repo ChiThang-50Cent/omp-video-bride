@@ -63,7 +63,10 @@ describe("http", () => {
     const { h, call } = await boot();
     h.scenario(okScenario());
     const cat = await call("GET", "/v1/catalog");
-    expect(cat.json.pipelines[0].options.voice).toContain("am_michael");
+    const explainer = cat.json.pipelines.find((p: { pipeline: string; options: { voice?: string[] } }) => p.pipeline === "hyperframes-explainer");
+    const storybook = cat.json.pipelines.find((p: { pipeline: string; options: Record<string, unknown> }) => p.pipeline === "hyperframes-storybook");
+    expect(explainer?.options.voice).toContain("am_michael");
+    expect(storybook?.pipeline).toBe("hyperframes-storybook");
     const c = await call("POST", "/v1/videos", { topic: "How TCP works", metadata: { chat: 42 } });
     expect(c.status).toBe(201);
     await h.app.idle();
@@ -71,7 +74,104 @@ describe("http", () => {
     expect(j.json.job.state).toBe("succeeded");
     expect(j.json.job.metadata).toEqual({ chat: 42 });
     expect(j.json.version.outputs.video).toMatch(/video\.mp4$/);
-    expect(j.json.events.map((e: any) => e.type)).toEqual(expect.arrayContaining(["start", "succeed"]));
+    expect(j.json.events.map((event: { type: string }) => event.type)).toEqual(expect.arrayContaining(["start", "succeed"]));
+    expect(c.json.project.pipeline).toBe("hyperframes-explainer");
+  });
+
+  it("routes an explicit storybook video by pipeline ID and preserves its profile", async () => {
+    const { h, call } = await boot();
+    h.scenario({ steps: [{ sleepMs: 5_000 }], final: "" });
+    const c = await call("POST", "/v1/videos", {
+      pipeline: "hyperframes-storybook",
+      title: "A seed grows",
+      topic: "Show a seed growing into a young plant",
+      brief: "A gentle story about patience and growth.",
+      durationSec: 30,
+      spec: {
+        style: "storybook-flat",
+        format: "landscape",
+        voice: "am_michael",
+        audience: "young children",
+        tone: "warm and calm",
+        narrationMode: "verbatim",
+        music: "none",
+      },
+      assets: [],
+      render: false,
+    });
+    expect(c.status).toBe(201);
+    expect(c.json.project.pipeline).toBe("hyperframes-storybook");
+    expect(c.json.project.brief).toBe("A gentle story about patience and growth.");
+    expect(c.json.project.spec).toMatchObject({
+      style: "storybook-flat",
+      narrationMode: "verbatim",
+      music: "none",
+    });
+    expect(c.json.job.pipeline).toBe("hyperframes-storybook");
+    const inspected = await call("GET", `/v1/projects/${c.json.project.id}`);
+    expect(inspected.json.project.pipeline).toBe("hyperframes-storybook");
+    expect(inspected.json.project.spec).toMatchObject({ style: "storybook-flat", narrationMode: "verbatim", music: "none" });
+    h.app.cancel(c.json.job.id);
+    await h.app.idle();
+  });
+
+  it("rejects an explainer-only style for storybook before starting a worker", async () => {
+    const { h, call } = await boot();
+    const response = await call("POST", "/v1/videos", {
+      pipeline: "hyperframes-storybook",
+      topic: "An incompatible style",
+      spec: { style: "creative-mode" },
+    });
+    expect(response.status).toBe(400);
+    expect(response.json.error.code).toBe("invalid_request");
+    expect(h.store.listJobs({ limit: -1 })).toHaveLength(0);
+  });
+
+  it("preserves storybook project profile and uploaded asset refs through build routing", async () => {
+    const { h, call } = await boot();
+    const projectResponse = await call("POST", "/v1/projects", {
+      name: "Seed asset story",
+      pipeline: "hyperframes-storybook",
+      brief: "A supplied character learns to wait for spring.",
+      spec: {
+        style: "storybook-flat",
+        format: "landscape",
+        voice: "am_michael",
+        audience: "young children",
+        tone: "warm and calm",
+        narrationMode: "verbatim",
+        music: "required",
+      },
+    });
+    expect(projectResponse.status).toBe(201);
+    const projectId = projectResponse.json.project.id;
+    const assetResponse = await call("POST", `/v1/projects/${projectId}/assets?name=character.png&tags=character`, undefined, Buffer.from("character"));
+    expect(assetResponse.status).toBe(201);
+
+    const sceneResponse = await call("POST", `/v1/projects/${projectId}/scenes`, {
+      title: "Waiting",
+      topic: "The character waits for spring",
+      brief: "Keep the supplied character recognizable.",
+      durationSec: 30,
+      assets: [assetResponse.json.asset.id],
+      findAssets: false,
+    });
+    expect(sceneResponse.status).toBe(201);
+
+    h.scenario({ steps: [{ sleepMs: 5_000 }], final: "" });
+    const buildResponse = await call("POST", `/v1/scenes/${sceneResponse.json.scene.id}/build`, { render: false });
+    expect(buildResponse.status).toBe(201);
+    expect(buildResponse.json.job.pipeline).toBe("hyperframes-storybook");
+
+    const inspected = await call("GET", `/v1/projects/${projectId}`);
+    expect(inspected.json.project.pipeline).toBe("hyperframes-storybook");
+    expect(inspected.json.project.brief).toBe("A supplied character learns to wait for spring.");
+    expect(inspected.json.project.spec).toMatchObject({ narrationMode: "verbatim", music: "required" });
+    expect(inspected.json.assets.map((asset: { id: string }) => asset.id)).toContain(assetResponse.json.asset.id);
+    expect(inspected.json.scenes[0].assetRefs).toEqual([assetResponse.json.asset.id]);
+
+    h.app.cancel(buildResponse.json.job.id);
+    await h.app.idle();
   });
 
   it("keeps same-name assets distinct and deletes the file with its record", async () => {

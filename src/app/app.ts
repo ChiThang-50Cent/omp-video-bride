@@ -281,8 +281,8 @@ export class App {
   }
 
   /** Convenience: one video = auto project with one scene. */
-  createVideo(i: { topic: string; title?: string; spec?: unknown; brief?: string; durationSec?: number; assets?: string[]; findAssets?: boolean }, o: JobOptions = {}) {
-    const project = this.createProject({ name: i.title ?? i.topic, spec: i.spec, brief: i.brief });
+  createVideo(i: { topic: string; title?: string; pipeline?: string; spec?: unknown; brief?: string; durationSec?: number; assets?: string[]; findAssets?: boolean }, o: JobOptions = {}) {
+    const project = this.createProject({ name: i.title ?? i.topic, pipeline: i.pipeline, spec: i.spec, brief: i.brief });
     const scene = this.addScene(project.id, { topic: i.topic, title: i.title, durationSec: i.durationSec, assets: i.assets, findAssets: i.findAssets });
     const r = this.buildScene(scene.id, o);
     return { project, scene, ...r };
@@ -529,7 +529,9 @@ export class App {
       revise: job.kind === "revise" ? { instructions: input.instructions ?? "", frames: input.frames ?? [], durationSec: input.durationSec ?? null, currentDurationSec: parent?.durationSec ?? null } : undefined,
       flags: input.flags, approvalNotes: queued.approvalNotes,
     };
+    mkdirSync(version.workdir, { recursive: true });
     mkdirSync(join(this.assetsDir(project.id), "found"), { recursive: true });
+    pipeline.prepareBuild?.(ctx);
     const om = pipeline.omp();
     const handle = this.d.runner.start({
       workdir: version.workdir, prompt: pipeline.prompt(ctx), resume: queued.resume, sessionFile: queued.sessionFile,

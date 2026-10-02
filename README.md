@@ -4,8 +4,9 @@
 repository's oh-my-pi (`omp`) video pipeline. It stores projects,
 scenes, versions, jobs, events, assets, and webhook outbox state in SQLite;
 project files and rendered artifacts stay in a separate data directory. The
-first bundled pipeline is the HyperFrames explainer. Hermes and Telegram are
-optional consumers of the bridge's signed webhook events.
+bundled pipelines are the HyperFrames technical explainer and the independently
+directed `storybook-flat` pipeline. Hermes and Telegram are optional
+consumers of the bridge's signed webhook events.
 
 The public repository is spelled **omp-video-bride** (without the second
 `g`): <https://github.com/ChiThang-50Cent/omp-video-bride>. The npm package
@@ -18,7 +19,15 @@ and local directory intentionally remain `omp-video-bridge`.
 - A SQLite-backed job state machine with bounded automatic crash recovery,
   approval gates, native render/stitch steps, and an at-least-once signed
   webhook outbox.
-- The `hyperframes-explainer` pipeline and its checked-in worker skill.
+- The `hyperframes-explainer` and `hyperframes-storybook` pipelines and their
+  checked-in worker skills. Storybook starts with coherent reusable character
+  and recurring background artwork, then uses readable whole-character slide/tilt
+  motion, measured narration/captions, and artifact-bound acceptance.
+  Its bundled `create-static-assets` skill handles missing or changed artwork
+  after storyboard/script approval, with exact-file still review before motion.
+  Build, approval continuation, revision and resume reuse suitable completed
+  artwork; narration/caption-only revisions do not regenerate it. Asset tasks
+  inherit caller model/tools and do not impose human anatomy or a fixed style.
 - Portable host systemd installation and offline stopped-data backup/restore
   tools.
 - An additional isolated Docker/Compose recipe. It is a separate deployment
@@ -80,6 +89,12 @@ npm run check             # typecheck + test + API + webhook smoke
 `npm run smoke:media` executes the native FFmpeg cut/fade path and decodes the
 result. Do not point a development process at a production `dataDir`; use an
 isolated directory and loopback port.
+
+With the pinned HyperFrames browser, Kokoro/Whisper assets and FFmpeg available,
+`node tools/smoke-storybook.mjs` creates and renders a real whole-character
+storybook fixture, including narration, music, captions, snapshots and negative
+gates. Its output remains review-required until actual visual evidence is
+inspected; `--cleanup` removes that smoke's temporary project.
 
 ## Deployment
 - [Docker onboarding](docs/SETUP.md#docker-onboarding): prerequisites, isolated

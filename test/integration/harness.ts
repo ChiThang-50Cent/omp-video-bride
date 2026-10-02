@@ -7,7 +7,7 @@ import { SqliteStore } from "../../src/adapters/store-sqlite/sqlite-store.ts";
 import { App, type Deps } from "../../src/app/app.ts";
 import { buildRouter } from "../../src/http/routes.ts";
 import { serve } from "../../src/http/router.ts";
-import { hyperframesExplainer } from "../../src/pipelines/hyperframes-explainer/index.ts";
+import { hyperframesExplainer, hyperframesStorybook } from "../../src/pipelines/hyperframes-explainer/index.ts";
 
 export const fakeOmp = resolve("test/fixtures/fake-omp.mjs");
 
@@ -31,7 +31,10 @@ export function harness(over: Partial<Deps> = {}, usagePollMs = 50) {
   const runner = new OmpRunner({ bin: process.execPath, argvPrefix: [fakeOmp], firstEventTimeoutSeconds: 120, baseEnv: { ...process.env, FAKE_OMP_SCENARIO: scenarioFile, FAKE_OMP_LOG: logFile } });
   const presets = join(dir, "presets");
   const app = new App({
-    store, runner, pipelines: { "hyperframes-explainer": hyperframesExplainer({ presetsDir: presets, upstreamScripts: "/x/scripts" }) },
+    store, runner, pipelines: {
+      "hyperframes-explainer": hyperframesExplainer({ presetsDir: presets, upstreamScripts: "/x/scripts" }),
+      "hyperframes-storybook": hyperframesStorybook({ presetsDir: presets, upstreamScripts: "/x/scripts" }),
+    },
     config: { dataDir: join(dir, "data"), concurrency: 1, model: "m", thinking: "high", workerModel: "m", workerThinking: "medium", maxMinutes: 60, maxUsd: 5, env: {}, skillDirs: [], usagePollMs },
     ...over,
   });

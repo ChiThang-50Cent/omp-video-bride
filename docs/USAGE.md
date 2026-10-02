@@ -81,10 +81,18 @@ jq -e '.pipelines | length > 0' "$CLIENT_DIR/catalog.json" >/dev/null
 jq '.pipelines[] | {pipeline, version, options}' "$CLIENT_DIR/catalog.json"
 ```
 
+Select a pipeline by its exact ID, never by array position:
+
+```bash
+PIPELINE_ID=hyperframes-explainer   # or hyperframes-storybook for a storybook request
+jq -e --arg id "$PIPELINE_ID" \
+  '.pipelines[] | select(.pipeline == $id)' "$CLIENT_DIR/catalog.json" >/dev/null
+```
+
 `GET /v1/health` is the only unauthenticated route. Every other route in this
-tutorial needs the bearer header supplied by `bridge_api`. Use the catalog to
-confirm the available `style`, `format`, and `voice` values before choosing a
-non-default style.
+tutorial needs the bearer header supplied by `bridge_api`. Use the selected
+pipeline's catalog to confirm the available `style`, `format`, and `voice`
+values before choosing a non-default style.
 
 ### Shared polling and artifact helpers
 
@@ -147,11 +155,13 @@ worker_path_to_host() {
 
 `POST /v1/videos` creates a one-scene project and returns all four IDs in one
 response: `.project.id`, `.scene.id`, `.version.id`, and `.job.id`. Save those
-IDs; never reconstruct one by guessing a prefix or a filesystem name.
+IDs; never reconstruct one by guessing a prefix or a filesystem name. The
+optional `pipeline` field selects an exact catalog ID; omitted requests preserve
+the `hyperframes-explainer` default.
 
 The request below uses only fields accepted by the current route schema. The
-HyperFrames pipeline accepts `style`, `format`, `voice`, `audience`, and `tone`
-in `spec`. `topic` is required; `durationSec` is in seconds. `approve` and
+explainer pipeline accepts `style`, `format`, `voice`, `audience`, and `tone` in
+`spec`. `topic` is required; `durationSec` is in seconds. `approve` and
 `render` are job options. `metadata` is caller data echoed in webhook events.
 
 ```bash
@@ -160,6 +170,7 @@ jq -n \
   --arg topic 'Explain hash tables and collision handling' \
   --arg brief 'Cover hash(key) modulo N, chaining, load factor, and resize.' \
   '{
+    pipeline: "hyperframes-explainer",
     title: $title,
     topic: $topic,
     brief: $brief,
@@ -345,6 +356,76 @@ paths are `/videos-v2/<relative path>` and are read-only. The bridge publishes
 only intended artifacts (MP4, contact sheets, captions, and approval documents)
 for the different Hermes UID; private sessions and configuration files are not
 published.
+
+### Storybook pipeline
+
+Use `pipeline: "hyperframes-storybook"` for an explicitly requested storybook;
+never choose it from the catalog's array position or infer it from a keyword.
+The supported profile is `style: "storybook-flat"` with explicit
+`format`, `voice`, `audience`, and `tone`, `narrationMode: "verbatim"` by
+default, and `music: "required"` by default (`"none"` only when requested).
+Preserve the user's story text and scene beats in `topic`/`brief`. The
+storybook workflow starts with complete reusable character image files and
+recurring background image files, inspects a still establishing-frame
+composition, and then uses sparse whole-character slides and slight tilts.
+Supplied or authorized artwork is allowed; this workflow does not require
+programmatic primitive drawing, paid generation, or fake placeholders. It is
+not generated cinematography or photoreal live action.
+
+When a story uses supplied files, create the project, upload every real
+character and background asset, and only then create/build its scenes. Reuse the
+same uploaded files for every shot that uses them. Do not put a host path or
+`metadata.localProjectDir` in the request; metadata does not transfer files:
+```bash
+jq -n '{
+  name: "The seed grows",
+  pipeline: "hyperframes-storybook",
+  brief: "A gentle story about patience and growth.",
+  spec: {
+    style: "storybook-flat", format: "landscape", voice: "am_michael",
+    audience: "young children", tone: "warm and calm",
+    narrationMode: "verbatim", music: "required"
+  }
+}' > "$CLIENT_DIR/storybook-project.json"
+bridge_api -X POST "$BRIDGE_URL/v1/projects" \
+  -H 'Content-Type: application/json' \
+  --data-binary @"$CLIENT_DIR/storybook-project.json" \
+  > "$CLIENT_DIR/storybook-project-response.json"
+STORY_PROJECT_ID=$(jq -er '.project.id' "$CLIENT_DIR/storybook-project-response.json")
+
+bridge_api -X POST \
+  "$BRIDGE_URL/v1/projects/$STORY_PROJECT_ID/assets?name=character.png&tags=character" \
+  --data-binary @/path/to/character.png \
+  > "$CLIENT_DIR/storybook-character-response.json"
+STORY_CHARACTER_ID=$(jq -er '.asset.id' "$CLIENT_DIR/storybook-character-response.json")
+bridge_api -X POST \
+  "$BRIDGE_URL/v1/projects/$STORY_PROJECT_ID/assets?name=fireplace-room.webp&tags=background" \
+  --data-binary @/path/to/fireplace-room.webp \
+  > "$CLIENT_DIR/storybook-background-response.json"
+STORY_BACKGROUND_ID=$(jq -er '.asset.id' "$CLIENT_DIR/storybook-background-response.json")
+```
+
+Create an API scene with `assets: [$STORY_CHARACTER_ID, $STORY_BACKGROUND_ID]` and
+build it only after both uploads succeed. Before motion, the worker creates
+`storybook.json` with root `characters` and `backgrounds` entries (local
+PNG/WebP/SVG paths, positive authored character dimensions) and shots that
+select a background ID plus cast entries with bottom-center canvas anchors.
+Inspect the still establishing frame in the real browser first; then reuse the
+same files and apply only finite whole-image x/y slides and small rotations
+across measured VO/word spans, returning to neutral when each utterance ends.
+Do not rock through silent padded time. Absent motion means completely still.
+One API scene can contain several
+internal storybook shots; do not create or report one API scene per internal
+shot. A user who already authorized production does not need an extra approval
+gate unless they asked for one. On delivery, inspect the storybook project's
+acceptance.json through the verified worker/Hermes path mapping and inspect
+`.hyperframes/storybook-audit.json`,
+`.hyperframes/storybook-audit/contact.json`, and the single required
+`.hyperframes/storybook-audit/visual-review.json`. It must bind its
+`sourceDigest` to the current audit evidence, reference only emitted evidence
+files, and contain substantive style/continuity/acting/captions observations for
+every internal shot. The contact report remains `review-required`;
+`succeeded` alone is not an aesthetic review or a delivery certificate.
 
 ## 3. Preview first, then use the native render job
 

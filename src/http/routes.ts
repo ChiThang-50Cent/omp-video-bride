@@ -10,6 +10,7 @@ const Meta = z.record(z.string(), z.unknown()).optional();
 const Limits = z.object({ maxMinutes: z.number().positive().max(240).optional(), maxUsd: z.number().positive().max(50).optional() }).optional();
 const JobOpts = { metadata: Meta, limits: Limits, approve: z.literal("storyboard").optional(), render: z.boolean().optional() };
 const SceneIn = { title: z.string().max(120).optional(), topic: z.string().min(3).max(1000), brief: z.string().max(4000).optional(), durationSec: z.number().min(10).max(300).optional(), assets: z.array(z.string()).optional(), findAssets: z.boolean().optional() };
+const VideoIn = { ...SceneIn, pipeline: z.string().optional() };
 
 export function buildRouter(app: App, store: Store, health: () => Record<string, unknown>): Router {
   const r = new Router();
@@ -21,7 +22,7 @@ export function buildRouter(app: App, store: Store, health: () => Record<string,
   r.route("POST", "/v1/videos", ({ body }) => {
     const { metadata, limits, approve, render, ...rest } = body;
     return created(app.createVideo(rest, { metadata, limits, approve, render }));
-  }, { schema: z.object({ ...SceneIn, spec: z.unknown().optional(), ...JobOpts }) });
+  }, { schema: z.object({ ...VideoIn, spec: z.unknown().optional(), ...JobOpts }) });
 
   // --- projects
   r.route("POST", "/v1/projects", ({ body }) => created({ project: app.createProject(body) }), {

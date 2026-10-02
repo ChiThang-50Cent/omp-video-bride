@@ -9,6 +9,8 @@ Job spec (fixed; never ask):
 - target length: ~{{durationSec}}s
 - audience: {{audience}}
 - tone: {{tone}}
+- narration mode: {{narrationMode}} (verbatim preserves approved speech exactly)
+- music: {{music}} (required means a real quiet music bed, not SFX alone)
 
 Flags:
 - approve: {{approve}}

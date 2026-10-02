@@ -4,7 +4,7 @@ Status: repository implementation. Prior v2 deployment evidence is recorded belo
 
 ## 1. Architecture and commands
 
-The host deployment runs the bridge and omp on the host with Hermes in Docker. The additional repository Compose deployment runs both the worker and Hermes in separate containers. HyperFrames `faceless-explainer` is the first pipeline. The core job state machine contains no HyperFrames-specific behavior.
+The host deployment runs the bridge and omp on the host with Hermes in Docker. The additional repository Compose deployment runs both the worker and Hermes in separate containers. Two pipelines are registered: HyperFrames `hyperframes-explainer` for technical explainers and `hyperframes-storybook` for art-first flat 2D storybook films built from complete reusable character/background images and sparse whole-character slide/tilt motion. The core job state machine contains no pipeline-specific behavior.
 
 Runtime: Node.js `^22.20.0 || ^24.0.0 || >=26.0.0`, native TypeScript stripping, built-in `node:sqlite`, `node:http`, and zod. TypeScript is used for typechecking; Vitest runs the tests. There is no emitted `dist` deployment or separate build step.
 
@@ -26,7 +26,7 @@ Host production uses `deploy/omp-video-bridge.service`, which starts `src/main.t
 ## 2. Domain and jobs
 
 - A project owns scenes, shared pipeline/spec, assets, timeline order/transitions, and its last stitched output.
-- A scene owns versions and selects a `currentVersionId`. Even a one-off video is a one-scene project.
+- A scene owns versions and selects a `currentVersionId`. Even a one-off video is a one-scene project. A storybook scene can contain multiple internal shots; internal shot count is not API scene count.
 - A version records `parentVersionId`, its workdir/projectDir, state, duration, notes, and outputs: `video`, `contactSheets[]`, `captionsGroups`.
 - Jobs are `build`, `revise`, `render` or `stitch`. They carry entity references, opaque caller metadata, usage, limits, result/error, and timestamps.
 - Project, scene, version and asset records are JSON documents in indexed SQLite tables. Jobs and append-only events are persisted separately.
@@ -55,10 +55,128 @@ Build preview (`render:false`) produces frame compositions and contact sheets bu
 - `catalog()` and `prompt(ctx)` for build/revise/resume/approval continuation.
 - `parseResult(finalText, workdir, {requireVideo})`.
 - `omp()` supplies skill directories and environment.
+- `prepareBuild?(ctx)` may write a pipeline-owned production contract after the workdir exists.
 - `prepareRevision(fromProjectDir, toWorkdir)` copies sources and rewrites embedded packet paths.
 - `render(projectDir, signal?)` encodes a preview natively.
 
-The HyperFrames implementation, prompt templates, custom skill, and helper scripts live together under `src/pipelines/hyperframes-explainer/`. Worker rules are a section of `omp-video-pipeline/SKILL.md`, not a separate skill. Upstream skills are not edited. The pipeline pins `hyperframes@0.8.82`.
+The two HyperFrames constructors live under `src/pipelines/hyperframes-explainer/`.
+`hyperframesExplainer` keeps the technical explainer contract; `hyperframesStorybook`
+uses the sibling `omp-storybook-pipeline` skill and accepts `style`,
+`format`, `voice`, `audience`, `tone`, `narrationMode` (`verbatim` or
+`restructured`, default `verbatim`), and `music` (`required` or `none`, default
+`required`). Its sole supported style is `storybook-flat`. Storybook production
+starts with coherent complete image assets and a still establishing-frame review,
+then uses whole-character slide/tilt transforms; supplied or authorized artwork
+is allowed and no paid-provider or primitive-drawing assumption is made. A
+storybook build must preserve its production contract and machine acceptance
+artifacts; visual review remains a human/aesthetic check.
+
+The HyperFrames implementation, prompt templates, custom skills, and helper scripts live together under `src/pipelines/hyperframes-explainer/`. The technical worker rules remain in `omp-video-pipeline/SKILL.md`; storybook rules and scripts are in the sibling storybook skill. Upstream skills are not edited. The pipeline pins `hyperframes@0.8.82`.
+
+### Storybook authoring manifest and compiled scene
+
+The worker's `storybook.json` is the source contract. It keeps
+`schemaVersion`, `kind:"hyperframes-storybook"`, `style:"storybook-flat"`,
+`format`, `canvas`, `durationSec`, `requirements`, `narration`, and `assets`.
+It adds root `characters` and `backgrounds` arrays; it does not accept alternate
+source or character-schema forms:
+
+```json
+{
+  "schemaVersion": 1,
+  "kind": "hyperframes-storybook",
+  "style": "storybook-flat",
+  "format": "landscape",
+  "canvas": {"width": 1920, "height": 1080},
+  "durationSec": 6,
+  "requirements": {
+    "narration": "required",
+    "narrationMode": "verbatim",
+    "music": "required"
+  },
+  "characters": [
+    {"id": "traveler", "path": "assets/characters/traveler.png",
+     "width": 240, "height": 420, "sha256": "<optional sha256>"}
+  ],
+  "backgrounds": [
+    {"id": "fireplace-room", "path": "assets/backgrounds/fireplace-room.webp",
+     "sha256": "<optional sha256>"}
+  ],
+  "assets": [],
+  "narration": {
+    "scriptPath": "SCRIPT.md",
+    "lines": [{"shotId": "opening", "text": "The exact authored line stays here."}]
+  },
+  "shots": [
+    {
+      "id": "opening",
+      "durationSec": 6,
+      "background": "fireplace-room",
+      "cast": [
+        {
+          "id": "traveler-opening",
+          "character": "traveler",
+          "x": 720,
+          "y": 900,
+          "scale": 1,
+          "motion": {
+            "keyframes": [
+              {"timeSec": 0, "x": 0, "y": 0, "rotation": 0},
+              {"timeSec": 6, "x": 0, "y": 0, "rotation": 0}
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+Character and background paths are local project-relative PNG, WebP, or SVG
+files. Character `width` and `height` are positive authored whole-image
+dimensions. A character is positioned by its bottom-center pivot. Shot cast
+`x`/`y` are bottom-center anchor pixels in the canvas; `scale` defaults to 1.
+Motion keyframes are finite, strictly ordered times within the shot, with `x`/`y`
+offsets from that anchor and `rotation` in degrees (default 0). Speaking
+slide/tilt windows SHOULD follow measured narration/word spans and return to
+neutral when each utterance ends; do not rock through silent padded time. Missing
+motion means completely still. The selected background asset covers the entire
+backdrop. Source files are reused, hashed, and bound to the compiled record.
+`durationSec` equals the sum of shot durations. The narration and caption
+metadata contracts remain unchanged.
+
+Run `compileProject(projectDir)` from
+`src/pipelines/hyperframes-explainer/skills/omp-storybook-pipeline/scripts/compile-scene.mjs`
+or its CLI:
+
+```bash
+node "$STORYBOOK_SCRIPTS/compile-scene.mjs" "$PROJECT_DIR"
+```
+
+The compiler writes `.hyperframes/storybook-assets-manifest.json` and
+`compositions/storybook-characters.html`. The compiled record may add audit
+bookkeeping, but must communicate the authored IDs, paths, dimensions, anchors,
+scales, and finite keyframes above. The native composition uses a paused
+registered GSAP timeline plus deterministic seek to drive actual encoded
+whole-image transforms and the caption wrapper. The mounted root, index, and
+composition expose explicit markers and current source hashes so audit can prove
+the files in the rendered page are the authored files.
+
+Final storybook acceptance binds the delivered video path to the audited artifact
+and compares sampled encoded frames against browser references at the same CFR
+frame timestamps. Codec-tolerant whole-frame and spatial-tile bounds detect
+visual mismatches; this is sampled evidence, not an exhaustive frame-by-frame
+comparison. Screenshot/contact-sheet bytes, contact metadata and the evidence
+digest are revalidated before accepting visual review. Older audits must be
+regenerated. Measured caption phrases must cover the authored narration words
+in order, using the existing case/punctuation normalization.
+
+The shared audio helper supports leading, intervening and trailing unnarrated
+beats while retaining the complete storyboard timeline for music and alignment.
+Silent projects do not require Kokoro/Whisper. Completed measured synthesis is
+checkpointed before fitting, music, alignment or caption failures, so reruns can
+reuse successful unchanged narration.
+
 
 ## 4. HTTP API
 
@@ -68,8 +186,8 @@ Every endpoint except `/v1/health` requires an explicit `Authorization: Bearer <
 |---|---|
 | `GET /v1/health` | App/pipeline versions, running/queued counts, webhook pending/dead counts or disabled |
 | `GET /v1/catalog` | All registered pipeline catalogs |
-| `POST /v1/videos` | Creates `{project,scene,job,version}` for a one-off build |
-| `POST/GET /v1/projects` | Create/list projects |
+| `POST /v1/videos` | Creates `{project,scene,job,version}` for a one-off build; optional `pipeline` selects an exact registered pipeline ID, defaulting to `hyperframes-explainer` |
+| `POST/GET /v1/projects` | Create/list projects; creation accepts an exact registered `pipeline` ID |
 | `GET/PATCH/DELETE /v1/projects/:id` | Inspect/update/remove a project; GET includes scenes/versions/assets |
 | `POST /v1/projects/:id/scenes` | Creates a scene without starting production |
 | `GET/DELETE /v1/scenes/:id` | Inspect/remove a scene; GET includes versions |
@@ -89,7 +207,7 @@ Every endpoint except `/v1/health` requires an explicit `Authorization: Bearer <
 | `POST /v1/jobs/:id/cancel` | Cancels a nonterminal job |
 | `POST /v1/jobs/:id/resume` | Explicitly resumes a failed, cancelled, or interrupted build/revise/render/stitch job; optional `{limits:{maxMinutes,maxUsd}}`; returns `{job}` |
 
-`src/http/routes.ts` contains the exact request schemas. Job submissions accept metadata, echoed in webhooks. The quick video endpoint uses the default pipeline; explicit pipeline selection is available when creating a project. Resume requests are authenticated and validate limits before mutation: `maxMinutes` is positive and at most 240, `maxUsd` is positive and at most 50, and native render/stitch jobs reject USD edits with `invalid_request`. `not_resumable` covers queued, running, awaiting-approval, succeeded, and rejected jobs. For an existing job, missing or mismatched project/scene/version references use `resume_unavailable`; an unknown job ID retains the normal `not_found` behavior. Conflicting or stale ready/current inputs are rejected without mutation.
+`src/http/routes.ts` contains the exact request schemas. Job submissions accept metadata, echoed in webhooks. `POST /v1/videos` accepts an optional exact pipeline ID and preserves the explainer default; unknown IDs are rejected. For storybook, upload real assets through `/v1/projects/:id/assets` before creating/building scenes and pass only returned IDs/names in scene `assets`; `metadata.localProjectDir` is never a file import. Explicit pipeline selection is also available when creating a project. Resume requests are authenticated and validate limits before mutation: `maxMinutes` is positive and at most 240, `maxUsd` is positive and at most 50, and native render/stitch jobs reject USD edits with `invalid_request`. `not_resumable` covers queued, running, awaiting-approval, succeeded, and rejected jobs. For an existing job, missing or mismatched project/scene/version references use `resume_unavailable`; an unknown job ID retains the normal `not_found` behavior. Conflicting or stale ready/current inputs are rejected without mutati…
 
 Resume guard errors are returned before any state/event/version/outbox change:
 `409 resume_unavailable` for missing or mismatched project/scene/version/timeline,
@@ -114,10 +232,35 @@ SQLite (`<dataDir>/bridge.db`, WAL) is the source of truth. Files live under:
   assets/<sanitized-name>
   assets/found/                         # optional sourced files and SOURCES.md
   scenes/<scene-id>/v<number>/          # omp cwd, sessions, logs, pipeline project
+    production-contract.json            # worker-side contract copy
+    videos/storybook/
+      production-contract.json           # project copy used by the storybook worker
+      storybook.json                     # root characters/backgrounds and shots
+      assets/                            # local character/background PNG/WebP/SVG files
+      compositions/storybook-characters.html
+      .hyperframes/storybook-assets-manifest.json
+      acceptance.json                    # machine acceptance and source/assets hashes
+      .hyperframes/storybook-audit.json  # machine audit report
+      .hyperframes/storybook-audit/
+        contact.json                     # visual-review handoff, sourceDigest/evidence, review-required
+        *.png                            # browser audit screenshots
+        visual-review.json               # single human review, bound to audit evidence
   final/final.mp4
 ```
 
 Version records point to the pipeline's rendered video/contact sheets; no copied `outputs/` tree or `current` symlink is maintained. Published media/caption outputs and approval documents are made readable (`0644`) for Hermes's different UID. Private sessions/config files are not included in that permission change.
+
+For `hyperframes-storybook`, the browser audit proves visible bounded full-character
+geometry, authored anchor positions/rotations, deterministic seek behavior,
+complete background coverage, same-file reuse, source/hash integrity, caption
+timing/safety, and real lint/media checks. Stationary characters are valid; no
+mandatory motion or extra visual-effect gate is required. `acceptance.json` must
+bind the actual source and asset hashes and is checked against the current
+production contract; a stale or missing report cannot certify the version.
+Delivery also requires `.hyperframes/storybook-audit/visual-review.json` with an
+approved verdict, the current audit `sourceDigest`, only emitted evidence files,
+and one substantive style/continuity/acting/captions observation per internal
+shot. Machine acceptance does not certify aesthetic quality.
 
 Project/scene deletion refuses queued, running, awaiting-approval and interrupted work without a history-size cap. Scene deletion also refuses active project stitches, cleans owned version directories and timeline references, and preserves imported external workdirs and terminal job/event history. Scene/version/timeline changes invalidate the previous final output. Asset uploads deduplicate by hash and disambiguate colliding names; staged writes/deletes compensate database failures.
 
@@ -200,6 +343,6 @@ Repository verification for 2.0.2: Node 22.22.3 typecheck and 52 tests passed; n
 
 Earlier live smoke evidence covers a 30s video, cancel, crash-resume/revision, a two-scene logo project with crossfade stitch, storyboard approval with reviewer notes, preview without MP4, native render, and real Telegram MP4/contact-sheet delivery. The approval/preview sample retained 11 contrast warnings; runtime/layout checks did not report errors.
 
-The original design also proposed items not implemented by the current code: generated OpenAPI, separate retry/log/event endpoints, scene PATCH, background-music mixing, stitched VTT/thumbnail output, automatic brand application, cheap-job priority, automatic retention/pruning, and complete legacy-project import. Health reports app and registered pipeline/worker-skill versions, but there is no automatic compatibility handshake with Hermes or upstream runtime tools. Manual cleanup and stopped backup/restore procedures are operational safeguards, not automatic retention.
+The original design also proposed items not implemented by the current code: generated OpenAPI, separate retry/log/event endpoints, scene PATCH, project-level music mixing after timeline stitching, stitched VTT/thumbnail output, automatic brand application, cheap-job priority, automatic retention/pruning, and complete legacy-project import. Storybook composition rendering already mixes its own narration and music bed. Health reports app and registered pipeline/worker-skill versions, but there is no automatic compatibility handshake with Hermes or upstream runtime tools. Manual cleanup and stopped backup/restore procedures are operational safeguards, not automatic retention.
 
 Video directories, session history and DB files are retained. Cleanup does not delete them or remove rollback history from Git.

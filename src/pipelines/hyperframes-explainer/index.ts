@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
-import { cpSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { Catalog, ParsedResult, Pipeline, PromptCtx } from "../../ports/pipeline.ts";
 import { renderTemplate } from "../template.ts";
+import { parseScript, validateAcceptance } from "./skills/omp-storybook-pipeline/scripts/acceptance.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const read = (name: string) => readFileSync(join(here, "prompts", name), "utf8");
@@ -34,19 +35,35 @@ const listPresets = (dir: string): string[] =>
     : [];
 
 export function hyperframesExplainer(opts: HyperframesOptions = {}): Pipeline {
+  return hyperframesPipeline(opts, false);
+}
+
+export function hyperframesStorybook(opts: HyperframesOptions = {}): Pipeline {
+  return hyperframesPipeline(opts, true);
+}
+
+function hyperframesPipeline(opts: HyperframesOptions, storybook: boolean): Pipeline {
   const presetsDir = opts.presetsDir ?? join(homedir(), ".pi/agent/skills/hyperframes-creative/frame-presets");
-  const upstreamScripts = opts.upstreamScripts ?? join(homedir(), ".agents/skills/faceless-explainer/scripts");
+  const upstreamPath = opts.upstreamScripts ?? join(homedir(), ".agents/skills/faceless-explainer/scripts");
+  // Upstream CLI entrypoint guards compare canonical paths, not symlink aliases.
+  const upstreamScripts = existsSync(upstreamPath) ? realpathSync(upstreamPath) : upstreamPath;
   const ourSkills = join(here, "skills");
   const ourScripts = join(ourSkills, "omp-video-pipeline/scripts");
+  const storybookScripts = join(ourSkills, "omp-storybook-pipeline/scripts");
+  const skill = storybook ? "omp-storybook-pipeline" : "omp-video-pipeline";
   const hf = opts.hyperframesVersion ?? "0.8.82";
-  const version = readFileSync(join(ourSkills, "omp-video-pipeline/SKILL.md"), "utf8").match(/^version:\s*(\S+)/m)?.[1] ?? "0";
+  const version = readFileSync(join(ourSkills, skill, "SKILL.md"), "utf8").match(/^version:\s*(\S+)/m)?.[1] ?? "0";
 
   const specSchema = z.object({
-    style: z.string().default("auto").refine(s => s === "auto" || listPresets(presetsDir).includes(s), { message: "unknown style preset (see GET /v1/catalog)" }),
+    style: storybook
+      ? z.enum(["storybook-flat"]).default("storybook-flat")
+      : z.string().default("auto").refine(s => s === "auto" || listPresets(presetsDir).includes(s), { message: "unknown style preset (see GET /v1/catalog)" }),
     format: z.enum(Object.keys(FORMATS) as [keyof typeof FORMATS, ...(keyof typeof FORMATS)[]]).default("landscape"),
     voice: z.enum(VOICES).default("am_michael"),
-    audience: z.string().max(200).default("developers"),
-    tone: z.string().max(200).default("clear, friendly, technical"),
+    audience: z.string().max(200).default(storybook ? "families" : "developers"),
+    tone: z.string().max(200).default(storybook ? "warm, gentle, character-led" : "clear, friendly, technical"),
+    narrationMode: z.enum(["verbatim", "restructured"]).default(storybook ? "verbatim" : "restructured"),
+    music: z.enum(["required", "none"]).default(storybook ? "required" : "none"),
   });
   const sceneOptionsSchema = z.object({}).strict();
 
@@ -56,6 +73,16 @@ export function hyperframesExplainer(opts: HyperframesOptions = {}): Pipeline {
     const { dir, foundDir, selected, others } = ctx.assets;
     const list = (a: typeof selected) => a.map(x => `${x.path} (${x.kind}${x.tags.length ? `, ${x.tags.join("/")}` : ""})`).join("; ");
     const lines = [`Project assets dir: ${dir}`];
+    if (storybook) {
+      lines.push(selected.length
+        ? `Use these supplied assets where they fit (required if the brief mentions them): ${list(selected)}`
+        : "No project assets were selected for this scene; create or choose complete reusable character and recurring background image assets with authorized available tools before composing shots.");
+      if (others.length) lines.push(`Other project assets (use only if clearly useful): ${list(others)}`);
+      lines.push(ctx.scene.findAssets
+        ? `You MAY source extra images with authorized available tools: follow the storybook skill's art-first asset rules; save them to ${foundDir}/ and log each in ${foundDir}/SOURCES.md.`
+        : `Do NOT download images from the internet. Prefer supplied/reusable local artwork; if new art is needed, create it only with authorized available tools and never use fake placeholders.`);
+      return lines.join("\n");
+    }
     lines.push(selected.length ? `Use these where they fit (required if the brief mentions them): ${list(selected)}` : "No project assets were selected for this scene.");
     if (others.length) lines.push(`Other project assets (use only if clearly useful): ${list(others)}`);
     lines.push(ctx.scene.findAssets
@@ -65,13 +92,42 @@ export function hyperframesExplainer(opts: HyperframesOptions = {}): Pipeline {
   };
 
   return {
-    id: "hyperframes-explainer",
+    id: storybook ? "hyperframes-storybook" : "hyperframes-explainer",
     version,
     specSchema,
     sceneOptionsSchema,
 
     async catalog(): Promise<Catalog> {
-      return { pipeline: "hyperframes-explainer", version, options: { style: ["auto", ...listPresets(presetsDir)], format: FORMATS, voice: VOICES, language: ["en"], durationSec: { min: 15, max: 180, default: 50 } } };
+      return {
+        pipeline: storybook ? "hyperframes-storybook" : "hyperframes-explainer", version,
+        options: {
+          style: storybook ? ["storybook-flat"] : ["auto", ...listPresets(presetsDir)],
+          format: FORMATS, voice: VOICES, language: ["en"],
+          narrationMode: ["verbatim", "restructured"], music: ["required", "none"],
+          durationSec: { min: 15, max: 180, default: 50 },
+        },
+      };
+    },
+
+    prepareBuild(ctx: PromptCtx) {
+      if (!storybook) return;
+      const path = join(ctx.workdir, "production-contract.json");
+      // A resumed job retains its bridge-owned contract.
+      if (ctx.kind === "resume" && existsSync(path)) return;
+      const spec = specSchema.parse(ctx.project.spec);
+      const script = ctx.projectDir ? join(ctx.projectDir, "SCRIPT.md") : null;
+      const baseline = spec.narrationMode === "verbatim" && script && existsSync(script) ? parseScript(script) : [];
+      const contract = {
+        pipeline: "hyperframes-storybook",
+        spec,
+        durationSec: ctx.revise?.durationSec ?? ctx.revise?.currentDurationSec ?? ctx.scene.durationSec,
+        brief: [ctx.project.brief, ctx.scene.brief].filter(Boolean).join("\n"),
+        revisionInstructions: ctx.revise?.instructions ?? "",
+        changedFrames: ctx.revise?.frames ?? [],
+        approvalNotes: ctx.approvalNotes ?? "",
+        ...(baseline.length ? { narrationSource: "[NARRATION]\n" + baseline.map(line => `${line.shotId}: ${line.text}`).join("\n") + "\n[/NARRATION]" } : {}),
+      };
+      writeFileSync(path, JSON.stringify(contract, null, 2) + "\n");
     },
 
     prompt(ctx: PromptCtx): string {
@@ -82,9 +138,15 @@ export function hyperframesExplainer(opts: HyperframesOptions = {}): Pipeline {
           render: String(ctx.flags.render),
           projectDir: ctx.projectDir ?? "(discover from the existing workdir)",
           notes: ctx.approvalNotes?.trim() || "(none)",
+          skill,
         });
       }
-      if (ctx.kind === "approve-continue") return renderTemplate(read("approve-continue.md"), { notes: ctx.approvalNotes?.trim() || "(none)" });
+      if (ctx.kind === "approve-continue") return renderTemplate(read("approve-continue.md"), {
+        notes: ctx.approvalNotes?.trim() || "(none)", skill,
+        continuation: storybook
+          ? "Continue the SAME storybook job after its storyboard gate. Preserve the approved story and narration; inventory actual assets, reuse suitable completed files, and finish missing or affected artwork with skill://create-static-assets before still review and motion/audio production. Do not assume assets already exist, rebuild the approved story, or switch to an explainer."
+          : "Continue the SAME job with the approval gate now passed. Apply reviewer notes, then start the deferred audio job at Phase B step 5 before staging fonts at step 7 and awaiting audio at step 8; do not skip audio generation.",
+      });
       const spec = specSchema.parse(ctx.project.spec);
       const brief = [
         ctx.project.brief && `Project context: ${ctx.project.brief}`,
@@ -92,20 +154,24 @@ export function hyperframesExplainer(opts: HyperframesOptions = {}): Pipeline {
         ctx.scene.brief,
       ].filter(Boolean).join("\n");
       if (ctx.kind === "build") {
-        return renderTemplate(read("build.md"), {
+        return renderTemplate(read(storybook ? "storybook-build.md" : "build.md"), {
           topic: ctx.scene.topic, style: spec.style, format: `${spec.format} ${FORMATS[spec.format]}`, voice: spec.voice,
           durationSec: String(ctx.scene.durationSec), audience: spec.audience, tone: spec.tone,
           approve: ctx.flags.approve ?? "none", render: String(ctx.flags.render),
           paths: paths(), assets: assetsBlock(ctx), brief: brief || "(none: derive from topic)",
+          narrationMode: spec.narrationMode, music: spec.music,
+          projectDir: join(ctx.workdir, "videos/storybook"),
+          contract: join(ctx.workdir, "production-contract.json"), storybookScripts, ourScripts,
         });
       }
       const r = ctx.revise!;
-      return renderTemplate(read("revise.md"), {
+      return renderTemplate(read(storybook ? "storybook-revise.md" : "revise.md"), {
         projectDir: ctx.projectDir!,
         instructions: r.instructions,
         frames: r.frames.length ? r.frames.join(", ") : "(not specified: infer from the instructions)",
         duration: r.durationSec ? `change to ~${r.durationSec}s (currently ${r.currentDurationSec ?? "?"}s)` : `keep (currently ${r.currentDurationSec ?? "?"}s)`,
         paths: paths(), assets: assetsBlock(ctx),
+        contract: join(ctx.workdir, "production-contract.json"), storybookScripts, ourScripts,
       });
     },
 
@@ -131,6 +197,15 @@ export function hyperframesExplainer(opts: HyperframesOptions = {}): Pipeline {
       }
       const video = j.video && j.video.length ? j.video : null;
       if (requireVideo && (!video || !existsSync(video))) return { kind: "invalid", message: `video missing on disk: ${video ?? "(none reported)"}` };
+      if (storybook) {
+        const original = join(workdir, "production-contract.json");
+        const copied = join(j.project_dir, "production-contract.json");
+        if (!existsSync(original) || !existsSync(copied) || readFileSync(original, "utf8") !== readFileSync(copied, "utf8")) {
+          return { kind: "invalid", message: "storybook production contract missing or differs from the bridge-approved request" };
+        }
+        const problem = validateAcceptance(j.project_dir, requireVideo, video ?? undefined);
+        if (problem) return { kind: "invalid", message: problem };
+      }
       const snaps = join(j.project_dir, "snapshots");
       const contactSheets = existsSync(snaps) ? readdirSync(snaps).filter(f => /^contact-sheet(-\d+)?\.jpg$/.test(f)).sort().map(f => join(snaps, f)) : [];
       const groups = join(j.project_dir, "caption_groups.json");
@@ -158,6 +233,10 @@ export function hyperframesExplainer(opts: HyperframesOptions = {}): Pipeline {
     },
 
     async render(projectDir: string, signal?: AbortSignal) {
+      if (storybook) {
+        const problem = validateAcceptance(projectDir, false);
+        if (problem) throw new Error(problem);
+      }
       const run = (cmd: string, args: string[]) =>
         new Promise<{ code: number | null; out: string }>(resolve => {
           const c = spawn(cmd, args, { cwd: projectDir, env: { ...process.env, ...opts.env }, signal });
@@ -167,9 +246,17 @@ export function hyperframesExplainer(opts: HyperframesOptions = {}): Pipeline {
           c.on("error", () => resolve({ code: -1, out }));
           c.on("close", code => resolve({ code, out }));
         });
-      const r = await run("npx", ["--yes", `hyperframes@${hf}`, "render", "--skill=faceless-explainer", "--quality", "high", "--output", "renders/video.mp4"]);
+      const renderArgs = ["--yes", `hyperframes@${hf}`, "render", "--quality", "high", "--output", "renders/video.mp4"];
+      renderArgs.push(storybook ? "--strict" : "--skill=faceless-explainer");
+      const r = await run("npx", renderArgs);
       const video = join(projectDir, "renders/video.mp4");
       if (r.code !== 0 || !existsSync(video)) throw new Error(`render failed (exit ${r.code}): ${r.out.slice(-1500)}`);
+      if (storybook) {
+        const audit = await run("node", [join(storybookScripts, "audit-storybook.mjs"), projectDir, "--video", video]);
+        if (audit.code !== 0) throw new Error(`storybook acceptance failed: ${audit.out.slice(-1500)}`);
+        const problem = validateAcceptance(projectDir, true, video);
+        if (problem) throw new Error(problem);
+      }
       const p = await run("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", video]);
       const d = Number.parseFloat(p.out.trim());
       return { video, durationSec: Number.isFinite(d) ? Math.round(d * 100) / 100 : null };

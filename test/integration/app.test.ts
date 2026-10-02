@@ -25,6 +25,59 @@ describe("build", () => {
     expect(argv).not.toContain("--continue");
   });
 
+  it("rejects a rendered storybook without verified production evidence", async () => {
+    const h = harness();
+    h.scenario({
+      steps: [],
+      writeFiles: {
+        "videos/storybook/renders/video.mp4": "fake",
+        "videos/storybook/production-contract.json": `{
+  "pipeline": "hyperframes-storybook",
+  "spec": {
+    "style": "storybook-flat",
+    "format": "landscape",
+    "voice": "am_michael",
+    "audience": "families",
+    "tone": "warm, gentle, character-led",
+    "narrationMode": "verbatim",
+    "music": "required"
+  },
+  "durationSec": 30,
+  "brief": "A small story about patience.",
+  "revisionInstructions": "",
+  "changedFrames": [],
+  "approvalNotes": ""
+}
+`,
+      },
+      final: '```json\n{"video":"{{cwd}}/videos/storybook/renders/video.mp4","project_dir":"{{cwd}}/videos/storybook","duration_s":30}\n```',
+    });
+    const created = h.app.createVideo({
+      pipeline: "hyperframes-storybook",
+      topic: "A seed waits for spring",
+      brief: "A small story about patience.",
+      durationSec: 30,
+      spec: {
+        style: "storybook-flat",
+        format: "landscape",
+        voice: "am_michael",
+        audience: "families",
+        tone: "warm, gentle, character-led",
+        narrationMode: "verbatim",
+        music: "required",
+      },
+    });
+    await h.app.idle();
+    expect(existsSync(join(created.version.workdir, "videos/storybook/renders/video.mp4"))).toBe(true);
+    const done = h.app.job(created.job.id);
+    expect(done.state).toBe("failed");
+    expect(done.error?.code).toBe("bad_result");
+    expect(done.error?.message).toMatch(/storybook|evidence|acceptance/i);
+    expect(done.error?.message).not.toMatch(/contract differs/i);
+    expect(h.app.version(created.version.id).state).toBe("failed");
+    expect(h.app.version(created.version.id).outputs.video).toBeNull();
+  });
+
   it("publishes media readable by a different container UID without exposing private files", async () => {
     const h = harness();
     const scenario = okScenario();

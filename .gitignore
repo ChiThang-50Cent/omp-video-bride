@@ -18,3 +18,5 @@ deploy/.env
 deploy/assets/
 deploy/state/
 deploy/build-inputs/
+.orca/
+AGENTS.md

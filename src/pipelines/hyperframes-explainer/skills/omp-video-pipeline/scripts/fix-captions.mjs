@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Correct transcription typos in audio_meta.json word timings against SCRIPT.md, the text the
-// voice actually read. Only 1:1 word substitutions inside an aligned run are replaced, so timings
-// stay intact. Usage: fix-captions.mjs <project-dir>   (then rebuild captions)
+// Correct legacy transcription typos in audio_meta.json against SCRIPT.md without changing measured
+// timings. Source-guided-v2 metadata is validated as exact authored phrase coverage instead.
+// Usage: fix-captions.mjs <project-dir> (then rebuild captions)
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -14,16 +14,52 @@ const metaPath = join(project, "audio_meta.json");
 const meta = JSON.parse(readFileSync(metaPath, "utf8"));
 const script = readFileSync(join(project, "SCRIPT.md"), "utf8");
 
-// SCRIPT.md: "## Line k — title (Frame N)" followed by an indented narration block.
+// SCRIPT.md uses a level-2/3 line heading followed by an indented narration block.
 const narration = new Map();
-for (const block of script.split(/^## /m).slice(1)) {
-  const frame = Number(block.match(/\(Frame (\d+)\)/)?.[1]);
-  if (!frame) continue;
-  const text = block.split("\n").filter(l => /^( {4}|\t)\S/.test(l)).map(l => l.trim()).join(" ");
-  if (text) narration.set(frame, text);
+let current = null;
+const flushNarration = () => {
+  if (!current) return;
+  const text = current.lines.join(" ").trim();
+  if (text) narration.set(current.frame, text);
+  current = null;
+};
+for (const line of script.split(/\r?\n/)) {
+  const heading = line.match(/^#{2,3}\s+(.+?)\s*$/);
+  if (heading) {
+    flushNarration();
+    const headingText = heading[1];
+    const explicit = headingText.match(/\((?:frame|beat|scene)\s+(\d+)\)/i);
+    const leading = headingText.match(/^(?:line|frame|beat|scene)\s+(\d+)/i);
+    const frame = Number(explicit?.[1] ?? leading?.[1]);
+    if (Number.isFinite(frame) && frame > 0) current = { frame, lines: [] };
+    continue;
+  }
+  if (!current || /^\s*\*\*[^*]+\*\*\s*:/.test(line)) continue;
+  const indented = line.match(/^(?: {4,}|\t)(.*)$/);
+  if (indented && indented[1].trim()) current.lines.push(indented[1].trim());
 }
+flushNarration();
 
 const norm = w => w.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+const displayTokens = text => String(text).split(/[\s()[\]{}]+/).filter(t => norm(t));
+if (meta.word_alignment === "source-guided-v2") {
+  const errors = [];
+  for (const voice of meta.voices ?? []) {
+    const expected = narration.get(voice.frame);
+    const want = displayTokens(expected ?? "").map(norm);
+    const got = (Array.isArray(voice.words) ? voice.words : []).flatMap(word => displayTokens(word.text)).map(norm);
+    if (!expected) errors.push(`frame ${voice.frame}: SCRIPT.md narration is missing`);
+    else if (!got.length) errors.push(`frame ${voice.frame}: source-guided ASR has no measured caption span`);
+    else if (got.length !== want.length || got.some((word, index) => word !== want[index]))
+      errors.push(`frame ${voice.frame}: measured ASR spans do not cover authored words exactly`);
+  }
+  if (errors.length) {
+    console.error(`source-guided caption validation failed:\n  ${errors.join("\n  ")}`);
+    process.exit(1);
+  }
+  console.log("source-guided captions match SCRIPT.md; preserving measured ASR spans");
+  process.exit(0);
+}
 const changes = [];
 for (const voice of meta.voices ?? []) {
   const text = narration.get(voice.frame);

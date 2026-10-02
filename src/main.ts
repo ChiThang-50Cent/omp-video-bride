@@ -9,7 +9,7 @@ import { App } from "./app/app.ts";
 import { loadConfig } from "./config.ts";
 import { buildRouter } from "./http/routes.ts";
 import { serve } from "./http/router.ts";
-import { hyperframesExplainer } from "./pipelines/hyperframes-explainer/index.ts";
+import { hyperframesExplainer, hyperframesStorybook } from "./pipelines/hyperframes-explainer/index.ts";
 
 const packageMetadata = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version?: string };
 
@@ -28,7 +28,10 @@ const now = () => new Date().toISOString();
 const app = new App({
   store,
   runner: new OmpRunner({ bin: cfg.omp.bin, firstEventTimeoutSeconds: cfg.omp.firstEventTimeoutSeconds }),
-  pipelines: { "hyperframes-explainer": hyperframesExplainer({ env: cfg.env }) },
+  pipelines: {
+    "hyperframes-explainer": hyperframesExplainer({ env: cfg.env }),
+    "hyperframes-storybook": hyperframesStorybook({ env: cfg.env }),
+  },
   config: {
     dataDir: cfg.dataDir, concurrency: cfg.runner.concurrency, model: cfg.runner.defaultModel, thinking: cfg.runner.defaultThinking,
     workerModel: cfg.runner.defaultModel, workerThinking: cfg.runner.defaultWorkerThinking,

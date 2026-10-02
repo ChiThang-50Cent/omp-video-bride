@@ -1,47 +1,159 @@
 #!/usr/bin/env node
-// One-shot faceless-explainer verification: fix caption typos against SCRIPT.md → captions build →
-// assemble → transitions inject/verify → check --json with frame-check (lint + runtime + layout +
-// off-canvas) → midpoint snapshot of every storyboard frame → compact per-frame defect list.
-// Usage: verify.mjs <project-dir> [--focus 5,6]   (run after audio + frames exist; safe to re-run after fixes)
-// --focus: also snapshot those frames at 20/40/60/80/95% so late-appearing elements are visible.
+// One-shot HyperFrames verification: central per-frame source recovery/lint →
+// fix caption typos against SCRIPT.md → captions build → assemble → transitions
+// inject/verify → check --json → midpoint snapshots → compact defect list.
+// Hard-gate failures return non-zero, while snapshots-check.json/contact sheets
+// are retained for review whenever assembly reaches those steps.
+// Usage: verify.mjs <project-dir> [--focus 5,6]
+// --focus: also snapshot those frames at 20/40/60/80/95% so late elements are visible.
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 
-const project = process.argv[2];
+const projectArg = process.argv[2];
 const fi = process.argv.indexOf("--focus");
 const focus = new Set(fi > 0 ? String(process.argv[fi + 1] ?? "").split(",").map(Number) : []);
-if (!project) {
+if (!projectArg) {
   console.error("usage: verify.mjs <project-dir> [--focus 5,6]");
   process.exit(2);
 }
-// realpath: upstream CLIs have a main guard that silently no-ops when invoked through the ~/.pi symlink.
-const scripts = realpathSync(process.env.UPSTREAM_SCRIPTS ?? join(homedir(), ".pi/agent/skills/faceless-explainer/scripts"));
-const own = new URL(".", import.meta.url).pathname;
-const run = (cmd, args, { allowFail = false } = {}) => {
+const project = resolve(projectArg);
+// Resolve upstream scripts before invoking them. Their published main guards
+// compare import.meta.url to process.argv[1], so a symlinked ~/.pi path can
+// otherwise silently no-op.
+const scriptArg = process.env.UPSTREAM_SCRIPTS ?? join(homedir(), ".pi/agent/skills/faceless-explainer/scripts");
+if (!existsSync(scriptArg)) {
+  console.error(`FAILED: upstream scripts directory not found: ${scriptArg}`);
+  process.exit(1);
+}
+const scripts = realpathSync(scriptArg);
+const own = dirname(realpathSync(new URL(import.meta.url).pathname));
+const failures = [];
+const capture = (cmd, args) => {
   try {
-    return execFileSync(cmd, args, { cwd: project, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 << 20 });
+    return {
+      status: 0,
+      stdout: execFileSync(cmd, args, {
+        cwd: project,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        maxBuffer: 64 << 20,
+      }),
+      stderr: "",
+    };
   } catch (e) {
-    if (allowFail) return e.stdout ?? "";
-    console.log(`FAILED: ${cmd} ${args.join(" ")}\n${(e.stderr || e.stdout || e.message).slice(-3000)}`);
-    process.exit(1);
+    return { status: e.status ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? e.message ?? "" };
   }
 };
+const run = (cmd, args) => {
+  const result = capture(cmd, args);
+  if (result.status !== 0) {
+    console.log(`FAILED: ${cmd} ${args.join(" ")}\n${(result.stderr || result.stdout).slice(-3000)}`);
+    process.exit(1);
+  }
+  return result.stdout;
+};
 
-// Frame list + midpoints from STORYBOARD.md ("## Frame N — title" followed by "- duration: Xs").
+// Frame list + midpoints from STORYBOARD.md. Keep the exact source path so
+// worker output can be gated before any assembler mutates index.html.
 const frames = [];
 let cursor = 0;
-for (const block of readFileSync(join(project, "STORYBOARD.md"), "utf8").split(/^## Frame /m).slice(1)) {
-  const n = Number(block.match(/^(\d+)/)?.[1]);
-  const title = block.match(/^\d+\s*[—-]\s*(.+)$/m)?.[1]?.trim() ?? "";
-  const dur = Number(block.match(/^- duration:\s*([\d.]+)s/m)?.[1]);
-  if (!n || !dur) continue;
-  frames.push({ n, id: String(n).padStart(2, "0"), title, start: cursor, end: cursor + dur, mid: +(cursor + dur / 2).toFixed(3) });
+let current = null;
+const storyboard = readFileSync(join(project, "STORYBOARD.md"), "utf8");
+const flushFrame = () => {
+  if (!current) return;
+  const dur = Number(current.duration);
+  if (!current.n || !Number.isFinite(dur) || dur <= 0) {
+    current = null;
+    return;
+  }
+  frames.push({
+    ...current,
+    id: String(current.n).padStart(2, "0"),
+    start: cursor,
+    end: cursor + dur,
+    mid: +(cursor + dur / 2).toFixed(3),
+  });
   cursor += dur;
+  current = null;
+};
+for (const line of storyboard.split(/\r?\n/)) {
+  const heading = line.match(/^#{2,3}\s+(?:Frame|Beat|Scene)\s+(\d+)\s*[—–:-]?\s*(.*)$/i);
+  if (heading) {
+    flushFrame();
+    current = { n: Number(heading[1]), title: heading[2]?.trim() ?? "", duration: NaN, src: null, status: "outline" };
+    continue;
+  }
+  if (!current) continue;
+  const meta = line.match(/^\s*[-*]?\s*(duration|src|status)\s*:\s*(.*?)\s*$/i);
+  if (!meta) continue;
+  if (meta[1].toLowerCase() === "duration") current.duration = Number(meta[2].match(/[\d.]+/)?.[0]);
+  else if (meta[1].toLowerCase() === "src") current.src = meta[2].replace(/^['"]|['"]$/g, "");
+  else current.status = meta[2].trim().toLowerCase();
 }
+flushFrame();
 if (!frames.length) {
-  console.log("FAILED: no '## Frame N' blocks with '- duration: Xs' in STORYBOARD.md");
+  console.log("FAILED: no '## Frame/Beat/Scene N' blocks with '- duration: Xs' in STORYBOARD.md");
+  process.exit(1);
+}
+
+const escapeRegExp = value => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const recoverFrameSource = (frame) => {
+  const expectedHint = frame.src
+    ? resolve(project, frame.src)
+    : join(project, "compositions", "frames", `${frame.id}.html`);
+  const src = String(frame.src ?? "");
+  if (!/^compositions\/frames\/[A-Za-z0-9._-]+\.html$/i.test(src) || src.includes("..") || src.includes("\\")) {
+    failures.push(`frame ${frame.id}: unsafe or missing src; expected a relative compositions/frames/*.html path (expected ${expectedHint})`);
+    return null;
+  }
+  const expected = resolve(project, src);
+  let actual = expected;
+  if (!existsSync(actual)) {
+    // Workers occasionally receive the repository root as their workdir while
+    // PROJECT_DIR is videos/<project>. Recover only this job's exact
+    // workdir/src path; never search sibling projects or guess by basename.
+    const jobWorkdir = resolve(project, "../..");
+    const misplaced = resolve(jobWorkdir, src);
+    if (misplaced !== expected && existsSync(misplaced)) {
+      mkdirSync(dirname(expected), { recursive: true });
+      copyFileSync(misplaced, expected);
+      actual = expected;
+      console.log(`recovered frame ${frame.id}: ${misplaced} → ${expected}`);
+    } else {
+      failures.push(`frame ${frame.id}: expected source missing at ${expected} (checked exact recovery path ${misplaced})`);
+      return null;
+    }
+  }
+  let html;
+  try {
+    html = readFileSync(actual, "utf8");
+  } catch (error) {
+    failures.push(`frame ${frame.id}: cannot read expected source ${expected}: ${error.message}`);
+    return null;
+  }
+  const compositionId = basename(src).replace(/\.html?$/i, "");
+  const idPattern = new RegExp(`data-composition-id\\s*=\\s*[\"']${escapeRegExp(compositionId)}[\"']`);
+  if (!idPattern.test(html)) {
+    failures.push(`frame ${frame.id}: ${expected} has no data-composition-id="${compositionId}" matching its basename`);
+    return null;
+  }
+  return src;
+};
+
+for (const frame of frames) {
+  const source = recoverFrameSource(frame);
+  if (!source) continue;
+  const gate = capture("node", [join(own, "lint-frame.mjs"), project, source]);
+  if (gate.status !== 0) {
+    const detail = String(gate.stderr || gate.stdout).trim().slice(-1800);
+    failures.push(`frame ${frame.id}: lint-frame failed for ${resolve(project, source)}${detail ? `\n${detail}` : ""}`);
+  }
+}
+if (failures.length) {
+  console.error("FAILED: frame gates:");
+  for (const failure of failures) console.error(`- ${failure}`);
   process.exit(1);
 }
 
@@ -49,12 +161,37 @@ const captionFix = run("node", [join(own, "fix-captions.mjs"), "."]).trim();
 run("node", [join(scripts, "captions.mjs"), "build", "--storyboard", "./STORYBOARD.md", "--audio-meta", "./audio_meta.json", "--hyperframes", ".", "--out", "./caption_groups.json"]);
 run("node", [join(scripts, "assemble-index.mjs"), "--storyboard", "./STORYBOARD.md", "--hyperframes", "."]);
 run("node", [join(scripts, "transitions.mjs"), "inject", "--storyboard", "./STORYBOARD.md", "--hyperframes", "."]);
-const tv = run("node", [join(scripts, "transitions.mjs"), "verify", "--storyboard", "./STORYBOARD.md", "--index", "./index.html"], { allowFail: true });
+const tvResult = capture("node", [join(scripts, "transitions.mjs"), "verify", "--storyboard", "./STORYBOARD.md", "--index", "./index.html"]);
+const tv = String(tvResult.stdout ?? "");
+if (tvResult.status !== 0 || /(?:^|\b)(?:fail|error)\b/i.test(tv)) {
+  failures.push(`transitions verify failed${tv.trim() ? `: ${tv.trim().slice(-1800)}` : ""}`);
+}
 
-const check = JSON.parse(run("npx", ["--yes", "hyperframes@0.8.82", "check", "--json"], { allowFail: true }) || "{}");
+const checkResult = capture("npx", ["--yes", "hyperframes@0.8.82", "check", "--json"]);
+const parseJsonOutput = output => {
+  const text = String(output ?? "").trim();
+  try { return JSON.parse(text); } catch {}
+  for (const line of text.split(/\r?\n/).reverse()) {
+    try { return JSON.parse(line); } catch {}
+  }
+  return {};
+};
+const check = parseJsonOutput(checkResult.stdout);
 writeFileSync(join(project, "snapshots-check.json"), JSON.stringify(check, null, 2));
+const checkFindings = Object.values(check).flatMap(section => section?.findings ?? []);
+const hardCheckErrors = checkFindings.filter(f => f.severity === "error").length +
+  Object.values(check).reduce((sum, section) => sum + Number(section?.errorCount ?? 0), 0);
+if (checkResult.status !== 0 || !Object.keys(check).length || check.ok === false || hardCheckErrors > 0) {
+  failures.push(
+    `hyperframes check failed (status ${checkResult.status}, ok=${check.ok ?? "unknown"}, hard errors=${hardCheckErrors}); ` +
+    "see snapshots-check.json",
+  );
+}
 const times = frames.flatMap(f => focus.has(f.n) ? [0.2, 0.4, 0.6, 0.8, 0.95].map(k => +(f.start + (f.end - f.start) * k).toFixed(3)) : [f.mid]);
-run("npx", ["--yes", "hyperframes@0.8.82", "snapshot", "--no-end", "--at", times.join(",")]);
+const snapshotResult = capture("npx", ["--yes", "hyperframes@0.8.82", "snapshot", "--no-end", "--at", times.join(",")]);
+if (snapshotResult.status !== 0) {
+  failures.push(`snapshot generation failed: ${String(snapshotResult.stderr || snapshotResult.stdout).trim().slice(-1800)}`);
+}
 
 // Attribute each finding to a frame via el-NN ids, frames/NN- source files, a composition id named in
 // the message ("composition script error: 05-walk-the-chain …"), or its timestamp.
@@ -89,16 +226,31 @@ for (const [section, res] of Object.entries(check)) {
   }
 }
 
-console.log(`check ok=${check.ok}  lint errors=${check.lint?.errorCount ?? "?"}  runtime errors=${check.runtime?.errorCount ?? "?"}  layout errors=${check.layout?.errorCount ?? "?"}  contrast warnings=${contrastWarnings} (not listed)`);
+console.log(`check ok=${check.ok ?? "?"}  lint errors=${check.lint?.errorCount ?? "?"}  runtime errors=${check.runtime?.errorCount ?? "?"}  layout errors=${check.layout?.errorCount ?? "?"}  contrast warnings=${contrastWarnings} (not listed)`);
 console.log(`captions: ${captionFix.replace(/\n/g, "; ")}`);
-if (!/pass|ok|✓/i.test(tv) || /fail|error/i.test(tv)) console.log(`transitions verify:\n${tv.trim().slice(-1500)}`);
-const sheets = readdirSync(join(project, "snapshots")).filter(f => /^contact-sheet(-\d+)?\.jpg$/.test(f)).sort().map(f => join(project, "snapshots", f));
-console.log(`contact sheet(s): ${sheets.join(", ")}  (${focus.size ? `focus frames ${[...focus]} sampled at 20/40/60/80/95%; ` : ""}full check JSON: snapshots-check.json)`);
+if (failures.some(failure => failure.startsWith("transitions verify"))) {
+  console.log(`transitions verify:\n${`${tv}\n${tvResult.stderr ?? ""}`.trim().slice(-1500)}`);
+}
+let sheets = [];
+try {
+  sheets = readdirSync(join(project, "snapshots"))
+    .filter(f => /^contact-sheet(-\d+)?\.jpg$/.test(f))
+    .sort()
+    .map(f => join(project, "snapshots", f));
+} catch (error) {
+  failures.push(`snapshot review directory missing at ${join(project, "snapshots")}: ${error.message}`);
+}
+console.log(`contact sheet(s): ${sheets.join(", ") || "(none)"}  (${focus.size ? `focus frames ${[...focus]} sampled at 20/40/60/80/95%; ` : ""}full check JSON: snapshots-check.json)`);
 for (const fr of frames) {
   const items = buckets.get(fr.id) ?? [];
   console.log(`\nframe ${fr.id} "${fr.title}" midpoint ${fr.mid}s — ${items.length ? `${items.length} machine findings` : "no machine findings"}`);
   for (const line of items.slice(0, 8)) console.log(`  - ${line}`);
   if (items.length > 8) console.log(`  … ${items.length - 8} more in snapshots-check.json`);
+}
+if (failures.length) {
+  console.error("\nFAILED: verification hard gate(s):");
+  for (const failure of failures) console.error(`- ${failure}`);
+  process.exitCode = 1;
 }
 const idx = buckets.get("index") ?? [];
 if (idx.length) {

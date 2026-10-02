@@ -40,6 +40,8 @@ export interface Pipeline {
   /** Extra scene-level options this pipeline understands. */
   readonly sceneOptionsSchema: ZodType<Record<string, unknown>>;
   catalog(): Promise<Catalog>;
+  /** Stage a bridge-owned production contract before authoring starts. */
+  prepareBuild?(ctx: PromptCtx): void;
   prompt(ctx: PromptCtx): string;
   parseResult(finalText: string, workdir: string, opts: { requireVideo: boolean }): ParsedResult;
   /** How omp is configured for this pipeline. */
