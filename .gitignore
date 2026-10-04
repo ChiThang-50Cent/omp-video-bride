@@ -1,23 +1,33 @@
+# Credentials and local environment
 .token
-data/
-node_modules/
-dist/
-*.log
-!hermes-skill/omp-orchestrator/SKILL.md
-!hermes-skill/omp-video/SKILL.md
-!omp-skills/*/SKILL.md
 .env
 .env.*
 !.env.example
+deploy/.env
+
+# Dependencies and generated files
+node_modules/
+dist/
+__pycache__/
+*.log
+
+# Local data and databases
+data/
 *.db
 *.db-wal
 *.db-shm
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
-deploy/.env
 deploy/assets/
 deploy/state/
 deploy/build-inputs/
+
+# Local tooling and agent context
 .orca/
 AGENTS.md
+
+# Keep canonical skills tracked
+!hermes-skill/omp-orchestrator/SKILL.md
+!hermes-skill/omp-video/SKILL.md
+!omp-skills/*/SKILL.md
