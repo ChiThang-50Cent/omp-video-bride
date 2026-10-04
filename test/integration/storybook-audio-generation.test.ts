@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, it } from "vitest";
 
-const script = resolve("src/pipelines/hyperframes-explainer/skills/omp-video-pipeline/scripts/audio.mjs");
+const script = resolve("omp-skills/omp-video-pipeline/scripts/audio.mjs");
 const temporary: string[] = [];
 afterEach(() => { for (const dir of temporary.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 const json = (path: string) => JSON.parse(readFileSync(path, "utf8"));

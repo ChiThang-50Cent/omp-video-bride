@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "vitest";
 // @ts-expect-error standalone worker JavaScript
-import { compareVisualPixels, evidenceDigest, verifyVisualEvidence } from "../../src/pipelines/hyperframes-explainer/skills/omp-storybook-pipeline/scripts/visual-evidence.mjs";
+import { compareVisualPixels, evidenceDigest, verifyVisualEvidence } from "../../omp-skills/omp-storybook-pipeline/scripts/visual-evidence.mjs";
 // @ts-expect-error standalone worker JavaScript
-import { sha256File } from "../../src/pipelines/hyperframes-explainer/skills/omp-storybook-pipeline/scripts/storybook-schema.mjs";
+import { sha256File } from "../../omp-skills/omp-storybook-pipeline/scripts/storybook-schema.mjs";
 
 function fixture(root: string) {
   writeFileSync(join(root, "screenshot.png"), "original screenshot");

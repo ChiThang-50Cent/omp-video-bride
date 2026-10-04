@@ -4,10 +4,10 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { auditStorybook } from "../src/pipelines/hyperframes-explainer/skills/omp-storybook-pipeline/scripts/audit-storybook.mjs";
-import { compileProject } from "../src/pipelines/hyperframes-explainer/skills/omp-storybook-pipeline/scripts/compile-scene.mjs";
-import { validateAcceptance } from "../src/pipelines/hyperframes-explainer/skills/omp-storybook-pipeline/scripts/acceptance.mjs";
-import { buildCaptions } from "../src/pipelines/hyperframes-explainer/skills/omp-storybook-pipeline/scripts/captions.mjs";
+import { auditStorybook } from "../omp-skills/omp-storybook-pipeline/scripts/audit-storybook.mjs";
+import { compileProject } from "../omp-skills/omp-storybook-pipeline/scripts/compile-scene.mjs";
+import { validateAcceptance } from "../omp-skills/omp-storybook-pipeline/scripts/acceptance.mjs";
+import { buildCaptions } from "../omp-skills/omp-storybook-pipeline/scripts/captions.mjs";
 
 const project = mkdtempSync(join(tmpdir(), "omp-storybook-smoke-"));
 if (process.argv.includes("--cleanup")) process.on("exit", () => rmSync(project, { recursive: true, force: true }));
@@ -151,7 +151,7 @@ const manifest = {
 };
 writeFileSync(join(project, "storybook.json"), `${JSON.stringify(manifest, null, 2)}\n`);
 const smokeVoice = process.env.STORYBOOK_SMOKE_VOICE ?? "am_michael";
-writeFileSync(join(project, "production-contract.json"), `${JSON.stringify({ pipeline: "hyperframes-storybook", spec: { style: "storybook-flat", format: "landscape", voice: smokeVoice, narrationMode: "verbatim", music: "required", audience: "children", tone: "gentle" }, durationSec: 8.8, brief: "Three friends gather in a warm fireplace room." }, null, 2)}\n`);
+writeFileSync(join(project, "production-contract.json"), `${JSON.stringify({ pipeline: "hyperframes-storybook", spec: { style: "storybook-flat", format: "landscape", voice: smokeVoice, narrationMode: "verbatim", music: "required", audience: "children", tone: "gentle" }, durationSec: 8.8, brief: "Three friends gather in a warm fireplace room.", permissions: { createAssets: true, generateAudio: true, renderVideo: true } }, null, 2)}\n`);
 writeFileSync(join(project, "STORYBOARD.md"), `---
 message: Three friends gather in a warm fireplace room.
 music: required
@@ -178,7 +178,7 @@ writeFileSync(join(project, "SCRIPT.md"), `# Narration
     Leo shares a bright idea by the fire.
 `);
 
-const audioCli = process.env.STORYBOOK_AUDIO_CLI ?? join(process.cwd(), "src/pipelines/hyperframes-explainer/skills/omp-video-pipeline/scripts/audio.mjs");
+const audioCli = process.env.STORYBOOK_AUDIO_CLI ?? join(process.cwd(), "omp-skills/omp-video-pipeline/scripts/audio.mjs");
 execFileSync(process.execPath, [audioCli, project, "--voice", smokeVoice, "--speed", "1", "--music", "required", "--narration-mode", "verbatim"], { cwd: project, stdio: "inherit", env: process.env, timeout: 1_800_000 });
 const audioMeta = JSON.parse(readFileSync(join(project, "audio_meta.json"), "utf8"));
 const arrivingVoice = audioMeta.voices.find(voice => Number(voice.frame) === 1);

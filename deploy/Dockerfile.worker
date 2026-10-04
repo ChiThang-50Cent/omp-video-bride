@@ -1,26 +1,32 @@
 # syntax=docker/dockerfile:1.7
-ARG WORKER_RUNTIME_IMAGE=omp-video-runtime:18.4.4-hf0.8.82-cpu
-FROM ${WORKER_RUNTIME_IMAGE} AS bridge-deps
-USER root
-RUN install -d -o 1001 -g 1001 /build/bridge
-USER 1001:1001
-WORKDIR /build/bridge
-COPY package.json package-lock.json ./
-RUN --mount=type=cache,target=/home/worker/.npm,uid=1001,gid=1001 \
-    npm ci --ignore-scripts --no-audit --fund=false --omit=dev --cache /home/worker/.npm
+ARG WORKER_RUNTIME_IMAGE
+
+FROM ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3 AS omp-bin
+RUN apt-get update && apt-get install -y --no-install-recommends python3.12 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY deploy/prepare-assets.py deploy/runtime-lock.json /fetch/
+RUN python3.12 /fetch/prepare-assets.py --runtime --select omp /inputs
 
 FROM ${WORKER_RUNTIME_IMAGE}
 # Preserve the checksum-pinned skills snapshot even when a job scaffolds a project.
 ENV HYPERFRAMES_SKIP_SKILLS=1
-COPY --from=bridge-deps --chown=1001:1001 /build/bridge/node_modules /opt/bridge/node_modules
-COPY --chown=1001:1001 deploy/prepare-assets.py deploy/prepare-assets.sh deploy/runtime-lock.json \
-    deploy/worker-entrypoint.mjs deploy/init-state.mjs deploy/worker-config.example.json /opt/bridge/deploy/
-# Application source is last: ordinary edits reuse all dependency layers.
-COPY --chown=1001:1001 package.json package-lock.json tsconfig.json LICENSE NOTICE /opt/bridge/
-COPY --chown=1001:1001 src /opt/bridge/src
+USER root
+COPY --from=omp-bin --chown=root:root /inputs/omp /opt/omp/omp
+COPY --chown=1001:1001 omp-skills /opt/omp-skills
+RUN ln -s /opt/omp-skills/omp-video-pipeline /opt/skills/omp-video-pipeline \
+ && ln -s /opt/omp-skills/omp-storybook-pipeline /opt/skills/omp-storybook-pipeline \
+ && ln -s /opt/omp-skills/create-static-assets /opt/skills/create-static-assets
+COPY --chown=1001:1001 deploy/direct-executor /opt/direct-executor
+COPY --chown=1001:1001 deploy/prepare-assets.py deploy/runtime-lock.json deploy/init-executor.py /opt/direct-executor/
+ENV OMP_EXECUTOR_HOST=0.0.0.0 OMP_EXECUTOR_PORT=9876 \
+    OMP_EXECUTOR_ROOT=/data/executor/workspaces \
+    OMP_EXECUTOR_TOKEN_FILE=/run/secrets/executor-token
+USER 1001:1001
+WORKDIR /data/executor
+# No bridge process or provider call is needed to check the transport listener.
 HEALTHCHECK --interval=5s --timeout=3s --start-period=10s --retries=12 \
-  CMD curl -fsS http://127.0.0.1:8765/v1/health >/dev/null || exit 1
-ENTRYPOINT ["node", "--disable-warning=ExperimentalWarning", "/opt/bridge/deploy/worker-entrypoint.mjs"]
-LABEL org.opencontainers.image.title="omp-video-worker" \
-      org.opencontainers.image.description="CPU video worker with external checksum-pinned models and Chrome" \
-      org.opencontainers.image.version="2.0.2"
+  CMD python3.12 -c "import socket; socket.create_connection(('127.0.0.1',9876),2).close()"
+ENTRYPOINT ["python3.12", "/opt/direct-executor/server.py"]
+LABEL org.opencontainers.image.title="omp-direct-executor" \
+      org.opencontainers.image.description="Authenticated internal TCP transport for OMP RPC; no video bridge workflow" \
+      org.opencontainers.image.version="0.3.0"

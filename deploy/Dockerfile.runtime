@@ -5,8 +5,8 @@
 FROM ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3 AS runtime-inputs
 RUN apt-get update && apt-get install -y --no-install-recommends python3.12 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY deploy/prepare-assets.py deploy/runtime-lock.json /fetch/
-RUN python3.12 /fetch/prepare-assets.py --runtime /inputs
+COPY deploy/prepare-assets.py deploy/media-runtime-lock.json /fetch/
+RUN python3.12 /fetch/prepare-assets.py --lock /fetch/media-runtime-lock.json --runtime /inputs
 
 FROM ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3 AS node-deps
 COPY --from=runtime-inputs /inputs/node /opt/node
@@ -51,7 +51,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
        libxfixes3 libxkbcommon0 libxrandr2 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=runtime-inputs /inputs/node /opt/node
-COPY --from=runtime-inputs /inputs/omp /opt/omp/omp
 COPY --from=runtime-inputs /inputs/skills /opt/skills
 COPY --from=node-deps /build/hyperframes/node_modules /opt/hyperframes/node_modules
 COPY --from=whisper-builder /opt/whisper /opt/whisper
@@ -60,7 +59,7 @@ COPY --from=node-deps --chown=1001:1001 /build/npm-cache /opt/npm-cache
 COPY deploy/hyperframes/package.json deploy/hyperframes/package-lock.json /opt/hyperframes/
 RUN groupadd --gid 1001 worker \
     && useradd --uid 1001 --gid 1001 --create-home --home-dir /home/worker --shell /bin/bash worker \
-    && install -d -o 1001 -g 1001 /data/worker /tmp/omp-worker \
+    && install -d -o 1001 -g 1001 /opt/omp /data/worker /tmp/omp-worker \
        /home/worker/.cache/hyperframes /home/worker/.cache/omp-video-fonts \
        /home/worker/.cache/hyperframes/tts \
        /home/worker/.config /home/worker/.omp /home/worker/.pi/agent /home/worker/.agents \
@@ -83,7 +82,8 @@ ENV HOME=/home/worker USER=worker \
     HYPERFRAMES_WHISPER_PATH=/opt/whisper/bin/whisper-cli
 WORKDIR /home/worker
 USER 1001:1001
-LABEL org.opencontainers.image.title="omp-video-runtime" \
-      org.opencontainers.image.node.version="22.20.0" \
-      org.opencontainers.image.hyperframes.version="0.8.82" \
-      org.opencontainers.image.omp.version="18.4.4"
+ARG NODE_VERSION=22.20.0
+ARG HYPERFRAMES_VERSION=0.8.82
+LABEL org.opencontainers.image.title="omp-media-runtime" \
+      org.opencontainers.image.node.version="${NODE_VERSION}" \
+      org.opencontainers.image.hyperframes.version="${HYPERFRAMES_VERSION}"

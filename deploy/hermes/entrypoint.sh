@@ -1,15 +1,6 @@
 #!/bin/sh
 set -eu
 
-# Docker secrets remain outside the image and are read only at process startup.
-if [ -f /run/secrets/webhook-secret ]; then
-  WEBHOOK_SECRET="$(cat /run/secrets/webhook-secret)"
-  export WEBHOOK_SECRET
-fi
-if [ -f /run/secrets/bridge-token ]; then
-  OMP_BRIDGE_TOKEN="$(cat /run/secrets/bridge-token)"
-  export OMP_BRIDGE_TOKEN
-fi
 HERMES_HOME="${HERMES_HOME:-/opt/data}"
 mkdir -p "$HERMES_HOME" "$HERMES_HOME/backups" "$HERMES_HOME/cron" "$HERMES_HOME/sessions" \
   "$HERMES_HOME/logs" "$HERMES_HOME/memories" "$HERMES_HOME/skills" "$HERMES_HOME/skins" \
@@ -35,7 +26,7 @@ fi
 
 if [ "$#" -eq 0 ]; then set -- hermes; fi
 case "$1" in
-  hermes|gateway|chat|model|config|doctor|setup|tools|skills|dump|update|--*)
+  hermes|gateway|chat|model|config|doctor|setup|tools|skills|plugins|dump|update|--*)
     exec /opt/hermes/.venv/bin/hermes "$@" ;;
   *) exec "$@" ;;
 esac

@@ -1,31 +1,66 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-10-04 (Direct stack clean cutover)
 
-- Give the real AAC mix/content integration case a bounded 20-second timeout: GitHub's Node 22/24 runners exceeded Vitest's default five seconds while executing its multiple FFmpeg encodes/decodes. Audio assertions and production acceptance thresholds are unchanged.
-- Fix storybook delivery to require the audited video's canonical path; compare sampled encoded frames with frame-aligned browser evidence and recheck screenshot/contact hashes, contact metadata and evidence digests at acceptance. Existing audits must be regenerated. Validate measured caption phrase coverage against authored narration.
-- Support silent and partially narrated audio timelines, retaining all beat offsets for music/alignment without requiring synthesis for silent projects. Checkpoint completed synthesis before downstream failures, normalize relative verification paths, and start deferred explainer audio after storyboard approval.
-- Verified these fixes in an isolated `omp-video-worker:2.0.2` workspace: typecheck, 122 tests, live API/webhook smoke, real Chrome preview, real Kokoro/Whisper sparse narration and overflow-cache reuse. Independent verification accepted an existing silent MP4, rejected a different delivery path, overwritten visual evidence and stale encoded artwork. No new video was rendered, paid model called or production state changed.
-- Fix silent-storybook acceptance without narration metadata or caption artifacts; reject stale/nonempty subtitles and mounted caption cues. Enforce speech-bound whole-character motion and neutral pose through interpolated segments and holds. Bind browser audio mounts and rendered PCM/AAC content to narration/music/SFX source plans, including per-clip omission checks. Bind Kokoro synthesis reuse to actual model/voice-pack content and runtime/implementation fingerprints rather than text/voice/speed alone.
-- Verified gate changes with typecheck and 104 tests, real Chrome mount checks, native silent-storybook final acceptance, actual pinned-asset cache mutation checks, and an 8.8-second narrated H.264/AAC Docker render using Kokoro ONNX and measured Whisper timing. Real render exposed missing reference preprocessing and an overstrict global-error bound for quiet music; mirror native PCM16/48kHz stereo preparation and use per-component source projection while retaining the full-mix content threshold. Independent MP4 transcription recovered both exact approved lines. No production rollout was performed.
-- Fresh independent verification validated assets as worker UID1001, transcribed both approved lines from the narrated MP4, inspected encoded speaking/post-speech neutral frames and caption evidence, rejected omitted music and out-of-span motion, recomputed both cache keys against installed assets, and passed the actual final acceptance CLI after a source-bound visual review.
-- Add `hyperframes-storybook` as an art-first `storybook-flat` pipeline: choose or create coherent complete character and recurring background image assets first, inspect a still establishing composition, and reuse those files with sparse whole-character slide/tilt motion, measured narration/captions, and source-bound acceptance. Keep the technical explainer as a distinct catalog profile.
-- Install the generic `create-static-assets` worker skill and connect storybook build, approval continuation, revision and resume to its creation/reuse/still-review procedure. Complete missing artwork after storyboard approval rather than assuming assets already exist; delegate coherent sets with caller-configured models/tools, preserve subject-appropriate identities, and reuse suitable files for narration/caption-only changes. Storybook manifest, renderer, acceptance and user gates are unchanged.
-- Verified static-asset integration with typecheck, 82 tests, live production prompt generation and bounded real OMP calls using caller-selected Luna medium. Main and asset worker read the installed skill; same-session after-approval resume corrected affected owl artwork, preserved the supplied room hash, inspected the exact-file browser still and returned an asset-phase JSON handoff. The first five-minute smoke did not finish; the authorized continuation completed in about three minutes. Full movie production, runtime revision/initial storyboard-gate coverage and production rollout were not exercised.
-- Pass pipeline selection through the HTTP/application boundary; make Hermes use the selected catalog contract and upload real asset bytes rather than treating `metadata.localProjectDir` as an import.
-- Batch offline Kokoro generation, cache voice and ASR results, preserve approved narration without truncation, align approved phrases to measured speech, and mix a provenance-bound offline music bed. Recover only same-job frame outputs and resolve canonical upstream helper paths before invoking symlinked CLIs.
-- Update the storybook authoring contract to bind local PNG/WebP/SVG sources and positive character dimensions, mount the full background asset, and preserve exact audio/caption and visual-review safeguards. Remove the obsolete articulated compiler and aliases.
-- Verified in the isolated pinned Docker runtime: typecheck, 82 tests, authenticated native API smoke, and a real constructor-driven preview-to-render flow producing an 8.8-second 1920×1080@30 H.264/AAC video. Inspected three distinct reusable whole characters, one recurring room, slide/tilt motion and safe caption frames; full FFmpeg decode and final source-bound acceptance passed. No paid model call or production rollout was performed.
-- Independent final verification inspected encoded slide/tilt/post-speech frames, transcribed both exact narration lines from the MP4, exercised stale assets/narration/music/captions/review and frozen-motion rejection, and loaded PNG/WebP/SVG on real browser surfaces. A separate constructor render produced an identical MP4 hash. Strict native lint recorded zero errors and eight non-blocking duplicate-media/timed-section warnings.
-- Add end-to-end Docker onboarding with separate omp/Hermes authentication, explicit bridge model selection, private configuration helpers, UID/file-bind reload guidance and a health-versus-readiness boundary.
-- Add a human-facing API/Telegram usage guide covering saved IDs, storyboard approval, preview/native render, artifact paths, revisions, cancellation, explicit manual resume, and best-effort budgets (including approval waiting).
-- Add authenticated manual resume for all four job kinds from `failed`, `cancelled`, or `interrupted`, with same-job identity, guard checks, cumulative usage, accepted replacement limits, `manual_resume` history, and `job.resumed` webhook semantics. Automatic crash recovery remains capped at two attempts with the original time window; native render/stitch never invoke omp.
-- Expand Docker operations with stopped app/support backups, mounted recovery helpers, controlled capabilities, force-recreation, rollback/schema boundaries, preserved path namespaces and troubleshooting. Pinned upstream runtime versions and dependencies are unchanged.
-- Move detailed host/Docker setup into `docs/SETUP.md`, keep the README as a concise entry point, and update onboarding/configuration links.
-- Condense the self-contained Hermes skill into action tables and short checklists; remove duplicated preset/guard catalogs and polling scripts while retaining approval/resume authorization, budget rules, artifact paths and Telegram delivery safeguards.
-- Verified locally with Node 22.22.3: typecheck, 74 tests, isolated HTTP continuation for all four job kinds, real FFmpeg media, and signed webhook delivery. Independent probes covered failed-after-approval continuation, changed timeline order, fresh-clock expiry, guard/outbox atomicity, and queued history loss. OMP used a fixture; no paid provider call, actual HyperFrames render, Telegram send, or production rollout was performed.
+- Execute approved clean cutover to sole direct architecture: Hermes → authenticated
+  internal TCP (`omp-executor:9876`) → pinned OMP 18.4.4.
+- Discontinue and remove the HTTP bridge (`/v1`), SQLite job store, transactional
+  outbox, background scheduler, and host systemd installation. Former bridge state
+  is preserved outside this repository and is not consumed by the direct stack.
+- Retain the native RPC plugin (`omp-executor`) exposing 6 tools covering all 48
+  pinned native OMP 18.4.4 RPC commands: `omp_sessions`, `omp_open`, `omp_rpc`,
+  `omp_events`, `omp_respond`, and `omp_close`.
+- Relocate retained production skills to canonical root `omp-skills/`
+  (`omp-video-pipeline`, `omp-storybook-pipeline`, `create-static-assets`). Worker
+  installs them at `/opt/omp-skills` discoverable alongside `/opt/skills`. Native
+  internal workflow identities remain `hyperframes-explainer` and
+  `hyperframes-storybook`.
+- Introduce canonical direct production contract helper at
+  `omp-skills/omp-video-pipeline/scripts/production-contract.mjs` (`node <helper> <absolute PROJECT_DIR> --input <absolute brief.json> [--update]`).
+  Validates `pipeline`, `spec`, `durationSec`, `brief`, and `permissions`
+  (`{createAssets:boolean, generateAudio:boolean, renderVideo:boolean}`). Refuses
+  overwrite without `--update`, preserves existing fields (`revisionInstructions`,
+  `changedFrames`, `approvalNotes`, `narrationSource`), and maintains approved
+  narration baselines on update. Skills must honor permissions; changes requiring
+  ungranted permissions escalate to Hermes/user.
+- Establish canonical Hermes skills at `hermes-skill/omp-orchestrator/SKILL.md`
+  (high-level planning, brief validation, permissions) and rewrite
+  `hermes-skill/omp-video/SKILL.md` for direct RPC only (no HTTP bridge routes or
+  compatibility modes). Hermes mounts both skills read-only at
+  `/opt/data/skills/omp-orchestrator` and `/opt/data/skills/omp-video`.
+- Canonical deployment uses `deploy/compose.yaml`, direct worker
+  `deploy/Dockerfile.worker` (`omp-direct-executor:0.3.0`), Hermes
+  `deploy/hermes/Dockerfile` (`omp-hermes-executor:0.3.0`), Hermes runtime base
+  `deploy/hermes/Dockerfile.runtime` (`omp-hermes-runtime:2026.9.24-telegram`), and
+  dependency base `deploy/Dockerfile.runtime` (`omp-runtime:18.4.4-hf0.8.82-cpu`).
+  Discontinue `*.executor` Dockerfiles and Compose aliases.
+- Use separate external state directory `OMP_DIRECT_STATE_DIR`, retaining existing
+  bootstrap permissions (`init-executor.py`, shared secret token mode 0644 inside
+  private 0700 secrets/, worker UID 1001, Hermes UID 10000).
+- Preserve safety boundaries: no transport-driven paid task replay or budget watcher;
+  exact session resume via `omp_open` requires a valid `session_id` or indexed
+  `session_file` and never falls back to fresh or latest sessions; media
+  acceptance fidelity remains unverified unless separately authorized.
+- Verified the current checkout in isolated Docker: TypeScript plus 28 no-media
+  integration tests, 40 transport/plugin regressions, native plugin doctor
+  (6 tools / 2 hooks), and the real Hermes → TCP → OMP smoke exercising all
+  48 native command kinds, exact session resume, interactive UI, background
+  settlement, and finalization cleanup. Both Hermes skills and all three OMP
+  skills were discovered and read through native runtime interfaces.
+  No paid provider, Telegram, audio synthesis, or video render was invoked.
+- Independent final runtime verification also exercised a real focused OMP child:
+  it read an isolated fixture file, yielded its result to the main agent, and
+  persisted its native child transcript. Production media fidelity remains
+  outside the authorized no-media checks.
 
-## 2.0.2 - 2026-09-30
+---
+
+## Historical releases (Bridge v2 / v1)
+
+The entries below record historical releases of the former HTTP bridge architecture,
+retained for audit and historical context.
+
+### Historical: 2.0.2 - 2026-09-30
 
 - Document the public `omp-video-bride` repository spelling while retaining the `omp-video-bridge` package name, supported Node runtimes, isolated configuration quickstart, authenticated API examples, Docker entry point, maintenance, and security disclosure guidance.
 - Replace the workstation-specific host unit with a safely rendered portable systemd template. `deploy/install.sh` provides schema/tool/secret preflight, non-mutating `--check-only` and `--print-unit`, and explicit service actions. Rendered units are exercised with systemd's parser and the actual configuration loader.
@@ -37,23 +72,22 @@
 - Publish the bridge source under the owner-selected Apache-2.0 license, with copyright NOTICE and license files included in the worker image.
 - Provision FFmpeg/ffprobe explicitly on ephemeral GitHub CI and release-verification runners instead of relying on the runner image's installed tools.
 - Use directly digest-pinned Ubuntu base declarations so Docker dependency automation detects the image. Keep Ubuntu 24.04 for the Python 3.12 runtime and manage this repository's internal runtime image through its build/release workflow.
-- Verified locally: typecheck, 52 tests, native API/HMAC HTTP smoke, real FFmpeg full decode, 6,000-file backup/restore and installer unit parsing. Fresh worker/runtime/Hermes images built; isolated worker API/media and Hermes dependency smoke passed. Production dependencies reported zero npm audit vulnerabilities. No production rollout, paid model call or actual Telegram send was performed.
 
-## 2.0.1 maintenance
+### Historical: 2.0.1 maintenance
 
 - Use native Node.js TypeScript execution consistently for `npm start`, watch-mode `npm run dev`, and production. Remove unused `tsx` and emitted-build configuration; require Node.js >=22.20.0. Include import tools in typechecking.
 - Integration test fixtures now stop their app, close SQLite and remove their temporary directories after each test.
 - Keep the custom pipeline and Hermes `SKILL.md` files visible to Git despite the workstation's global ignore rule.
 - Correct the deployment example to the host-loopback Hermes webhook URL. Replace the stale design draft with the actual API/runtime contract and an explicit list of retained design gaps.
-- Verified: 35 tests, typecheck, isolated native start/watch health and catalog smoke checks. Production health remained OK; video data, DB, token and live configuration were not changed.
 
-## v2.0.1
+### Historical: v2.0.1
 
 - Publish video, contact sheets, caption data and approval documents as `0644`, so Hermes can read the read-only bind mount under its own UID. Session/config files are unchanged.
 - Hermes skill: authenticated bridge access, host-to-container path translation, explicit owner-granted per-route `terminal`/`file`/`skills`, and actual attachments via `/opt/hermes/bin/hermes send`. Sender warnings are treated as partial delivery, not success for every file.
 - Live verification: storyboard gate stopped before audio/frames; reviewer notes applied on continuation; preview produced no MP4; native render produced a 20.47s H.264/AAC 1080p/30 video without LLM usage. Real completion replay sent MP4 and contact sheet to Telegram without warnings. The preview retained 11 contrast warnings.
 
-## v2.0.0
+### Historical: v2.0.0
+
 Full rewrite in TypeScript. The running service uses v2; v1 sources remain available in historical commit `7634908`.
 
 - Core job state machine (pure), SQLite store with migrations, `Pipeline` plugin port; HyperFrames explainer is the first pipeline.

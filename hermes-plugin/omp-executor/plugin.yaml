@@ -1,0 +1,14 @@
+name: omp-executor
+version: "0.3.0"
+description: "Authenticated direct OMP RPC executor plugin for Hermes."
+kind: standalone
+provides_tools:
+  - omp_sessions
+  - omp_open
+  - omp_rpc
+  - omp_events
+  - omp_respond
+  - omp_close
+provides_hooks:
+  - on_session_finalize
+  - on_session_reset

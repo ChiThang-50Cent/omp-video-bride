@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, it } from "vitest";
 
-const captions = resolve("src/pipelines/hyperframes-explainer/skills/omp-storybook-pipeline/scripts/captions.mjs");
+const captions = resolve("omp-skills/omp-storybook-pipeline/scripts/captions.mjs");
 const temporary: string[] = [];
 const narration = "The quick fox jumps.";
 

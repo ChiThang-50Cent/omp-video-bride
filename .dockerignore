@@ -1,28 +1,27 @@
 # Only reproducible build recipes, locks and application source enter the context.
 **
-!package.json
-!package-lock.json
-!tsconfig.json
 !LICENSE
 !NOTICE
-!src/
-!src/**
+!omp-skills/
+!omp-skills/**
 !deploy/
 !deploy/Dockerfile.runtime
 !deploy/Dockerfile.worker
+!deploy/direct-executor/
+!deploy/direct-executor/**
+!deploy/init-executor.py
 !deploy/runtime-lock.json
 !deploy/requirements.worker.txt
 !deploy/prepare-assets.py
-!deploy/prepare-assets.sh
-!deploy/worker-entrypoint.mjs
-!deploy/init-state.mjs
-!deploy/worker-config.example.json
 !deploy/hyperframes/
 !deploy/hyperframes/package.json
 !deploy/hyperframes/package-lock.json
 !deploy/hermes/
 !deploy/hermes/Dockerfile
+!deploy/hermes/Dockerfile.runtime
 !deploy/hermes/entrypoint.sh
+!deploy/hermes/fetch-omp-rpc.py
+!deploy/hermes/omp-rpc-lock.json
 # Explicit exclusions also apply to nested application inputs.
 **/.env
 **/.env.*

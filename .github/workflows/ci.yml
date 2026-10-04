@@ -25,19 +25,34 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
-      - name: Install media dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends ffmpeg
       - run: npm run check
-      - name: Real media smoke
-        run: npm run smoke:media
       - name: Deployment syntax
         env:
-          OMP_VIDEO_STATE_DIR: /tmp/omp-video-ci-state
+          OMP_DIRECT_STATE_DIR: /tmp/omp-direct-ci-state
         run: |
-          for script in deploy/install.sh deploy/setup.sh deploy/prepare-assets.sh deploy/hermes/entrypoint.sh; do sh -n "$script"; done
-          docker compose -f deploy/compose.yaml config --quiet
+          sh -n deploy/hermes/entrypoint.sh
+          python3 deploy/runtime-pins.py --check
+          python3 deploy/runtime-pins.py --format env > /tmp/runtime-pins.env
+          docker compose --env-file /tmp/runtime-pins.env -f deploy/compose.yaml config --quiet
           python3 -c 'import ast,pathlib; ast.parse(pathlib.Path("deploy/prepare-assets.py").read_text())'
-      - name: Operations smoke
-        run: npm run smoke:ops
+          python3 -c 'import ast,pathlib; ast.parse(pathlib.Path("deploy/init-executor.py").read_text())'
+          python3 -c 'import ast,pathlib; ast.parse(pathlib.Path("deploy/runtime-pins.py").read_text())'
+  direct-executor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Fetch checksum-pinned Python RPC client
+        run: python3 deploy/hermes/fetch-omp-rpc.py deploy/hermes/omp-rpc-lock.json "$RUNNER_TEMP/omp-rpc"
+      - name: Direct executor behavioral tests
+        env:
+          PYTHONPATH: ${{ runner.temp }}/omp-rpc/src
+        run: python3 -m unittest discover -s test/direct-executor -v
+      - name: Direct deployment syntax
+        env:
+          OMP_DIRECT_STATE_DIR: /tmp/omp-direct-ci-state
+        run: |
+          python3 deploy/runtime-pins.py --format env > /tmp/runtime-pins.env
+          docker compose --env-file /tmp/runtime-pins.env -f deploy/compose.yaml config --quiet

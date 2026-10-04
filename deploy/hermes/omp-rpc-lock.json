@@ -1,0 +1,14 @@
+{
+  "version": "18.4.4",
+  "commit": "8ac1309bd8adaddc891eeb389c545345073875be",
+  "sourcePath": "python/omp-rpc",
+  "files": {
+    "__init__.py": "2bdfbf8744fbc43aeda48ce9eccc27181c78bbd1e9c5490e96929d8d08b27d10",
+    "client.py": "3c393412776420064d0f6dc56c72fd37ea3abe71e59355e3a2fd0e744142ba4c",
+    "protocol.py": "18bc58a2a50ae7d6cd4e4b87b1ee2701e467561429b251f73f39803ce370ef0c",
+    "host_tools.py": "7e0036b1fcf5fdedec9c7011d6a428a9dd0de670d4ed700aa9d788dad35b4797",
+    "host_uris.py": "2b5c73c6ca528d2be705e6020c1768856fd76b67641eafd33109dbacbed63ade",
+    "py.typed": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+  },
+  "licenseSha256": "048c9ebb09976a1c2e895d23f91dbe9114bd7858bfd7ff3b6a8f957feccbdfeb"
+}

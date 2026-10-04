@@ -1,0 +1,86 @@
+{
+  "assets": {
+    "chrome": {
+      "archiveRoot": "chrome-headless-shell-linux64",
+      "binarySha256": "ba90c0d07ea57016fd18a95bf038d75958e1fd859537b82a47a459bb020700de",
+      "revision": "1705227",
+      "sha256": "dd5889604bede9757e2cbbf435624ea3d2c8f5b4836c1338bbcbec725f88555d",
+      "url": "https://storage.googleapis.com/chrome-for-testing-public/156.0.8075.0/linux64/chrome-headless-shell-linux64.zip",
+      "version": "156.0.8075.0"
+    },
+    "models": {
+      "kokoro": {
+        "path": "tts/models/kokoro-v1.0.onnx",
+        "sha256": "7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5",
+        "url": "https://huggingface.co/mikkoph/kokoro-onnx/resolve/55c2af9958bf69eee07133cda380c1599c2f2bc5/kokoro-v1.0.onnx"
+      },
+      "voices": {
+        "path": "tts/voices/voices-v1.0.bin",
+        "sha256": "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d",
+        "url": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/voices-v1.0.bin"
+      },
+      "whisper-small.en": {
+        "path": "whisper/models/ggml-small.en.bin",
+        "sha256": "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.en.bin"
+      }
+    }
+  },
+  "notes": [
+    "Kokoro model preserves the tested bytes via an immutable HF mirror revision; the canonical upstream ONNX model currently has a different SHA256.",
+    "Skills preserve the audited composite snapshot from two immutable upstream commits; no floating skills update.",
+    "Fonts/CDN and provider authentication may require network at runtime. Assets initialization runs before the worker, not during image build."
+  ],
+  "platform": "linux/amd64",
+  "runtimeInputs": {
+    "media-use": {
+      "archiveRoot": "hyperframes-2195db5e1d05f72d966e880e4d258a2e779fa143/skills",
+      "destination": "skills",
+      "kind": "tar",
+      "select": [
+        "media-use"
+      ],
+      "sha256": "260f875423345e50f0ac81fd0c7c62bd0469a98735795479fc9a5392f4eb5f45",
+      "url": "https://codeload.github.com/heygen-com/hyperframes/tar.gz/2195db5e1d05f72d966e880e4d258a2e779fa143"
+    },
+    "node": {
+      "archiveRoot": "node-v22.20.0-linux-x64",
+      "destination": "node",
+      "kind": "tar",
+      "sha256": "00bbd05e306ea68b6e13e17360d0e2f680b493ef95f2fea1c4296ff7437530bc",
+      "url": "https://nodejs.org/dist/v22.20.0/node-v22.20.0-linux-x64.tar.xz"
+    },
+    "skills": {
+      "archiveRoot": "hyperframes-663b02297d58b56d7153bb156451ebb2b830941b/skills",
+      "destination": "skills",
+      "kind": "tar",
+      "select": [
+        "hyperframes",
+        "hyperframes-animation",
+        "hyperframes-audio",
+        "hyperframes-cli",
+        "hyperframes-core",
+        "hyperframes-creative",
+        "hyperframes-keyframes",
+        "hyperframes-registry",
+        "hyperframes-studio",
+        "faceless-explainer"
+      ],
+      "sha256": "43223e60336b1bec641b18429e1c8bbd963ed30404c93b62bee7a384c4d71613",
+      "url": "https://codeload.github.com/heygen-com/hyperframes/tar.gz/663b02297d58b56d7153bb156451ebb2b830941b"
+    },
+    "whisper": {
+      "archiveRoot": "whisper.cpp-d09f61a708f3487afa956ff578e60eae5e7a233c",
+      "destination": "whisper-src",
+      "kind": "tar",
+      "sha256": "750655899a32d5bb5b04bbde9afa430f851d46718f53812a4ec086537fee3ef8",
+      "url": "https://codeload.github.com/ggml-org/whisper.cpp/tar.gz/d09f61a708f3487afa956ff578e60eae5e7a233c"
+    }
+  },
+  "versions": {
+    "chrome": "156.0.8075.0",
+    "hyperframes": "0.8.82",
+    "node": "22.20.0",
+    "whisperSource": "d09f61a708f3487afa956ff578e60eae5e7a233c"
+  }
+}

@@ -8,7 +8,7 @@ import { afterEach, describe, it } from "vitest";
 
 // Standalone pipeline helpers are shipped as JavaScript, without TypeScript declarations.
 // @ts-expect-error no declaration for the standalone .mjs helper
-import * as api from "../../src/pipelines/hyperframes-explainer/skills/omp-storybook-pipeline/scripts/audio-evidence.mjs";
+import * as api from "../../omp-skills/omp-storybook-pipeline/scripts/audio-evidence.mjs";
 const temporary: string[] = [];
 afterEach(() => { for (const dir of temporary.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 function ffmpeg(args: string[]) { execFileSync("ffmpeg", ["-v", "error", "-y", ...args], { stdio: "pipe" }); }

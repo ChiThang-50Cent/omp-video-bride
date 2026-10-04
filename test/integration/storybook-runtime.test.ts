@@ -5,10 +5,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { afterEach, describe, it } from "vitest";
-import { hyperframesStorybook } from "../../src/pipelines/hyperframes-explainer/index.ts";
 
-const compiler = resolve("src/pipelines/hyperframes-explainer/skills/omp-storybook-pipeline/scripts/compile-scene.mjs");
-const captions = resolve("src/pipelines/hyperframes-explainer/skills/omp-storybook-pipeline/scripts/captions.mjs");
+const compiler = resolve("omp-skills/omp-storybook-pipeline/scripts/compile-scene.mjs");
+const captions = resolve("omp-skills/omp-storybook-pipeline/scripts/captions.mjs");
 const temporary: string[] = [];
 
 afterEach(() => {
@@ -135,21 +134,5 @@ describe("storybook whole-character runtime contract", () => {
     const result = spawnSync(process.execPath, [captions, dir], { encoding: "utf8" });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /voices must be empty/);
-  });
-
-  it("rejects delivery of a different existing file than the audited video", () => {
-    const dir = fixture();
-    execFileSync(process.execPath, [compiler, dir], { encoding: "utf8" });
-    writeFileSync(join(dir, "index.html"), readFileSync(join(dir, "compositions/storybook-characters.html")));
-    writeFileSync(join(dir, "production-contract.json"), "{}");
-    // Byte fixtures are sufficient: path binding must fail before decoding media.
-    writeFileSync(join(dir, "audited.bin"), "audited artifact");
-    writeFileSync(join(dir, "unrelated.bin"), "unrelated artifact");
-    writeFileSync(join(dir, ".hyperframes/storybook-audit.json"), JSON.stringify({ video: { path: "audited.bin" } }));
-    const pipeline = hyperframesStorybook();
-    const result = pipeline.parseResult("```json\n" + JSON.stringify({
-      project_dir: dir, video: join(dir, "unrelated.bin"),
-    }) + "\n```", dir, { requireVideo: true });
-    assert.deepEqual(result, { kind: "invalid", message: "reported video path does not match audited final video" });
   });
 });

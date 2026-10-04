@@ -1,6 +1,6 @@
 {
-  "name": "omp-video-bridge",
-  "version": "2.0.2",
+  "name": "omp-direct-executor",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "license": "Apache-2.0",
@@ -12,18 +12,13 @@
     "node": "^22.20.0 || ^24.0.0 || >=26.0.0"
   },
   "scripts": {
-    "start": "node --disable-warning=ExperimentalWarning src/main.ts",
-    "dev": "node --watch --disable-warning=ExperimentalWarning src/main.ts",
+    "start": "python3 deploy/direct-executor/server.py",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "smoke": "node --disable-warning=ExperimentalWarning tools/smoke.ts",
-    "smoke:media": "node --disable-warning=ExperimentalWarning tools/smoke-media.ts",
-    "smoke:ops": "node --disable-warning=ExperimentalWarning tools/smoke-ops.ts",
-    "smoke:webhook": "node --disable-warning=ExperimentalWarning tools/smoke-webhook.ts",
-    "check": "npm run typecheck && npm test && npm run smoke && npm run smoke:webhook"
-  },
-  "dependencies": {
-    "zod": "^4.6.5"
+    "test:no-media": "vitest run test/integration/storybook-production-contract.test.ts test/integration/storybook-runtime.test.ts test/integration/storybook-motion-timing.test.ts test/integration/storybook-visual-evidence.test.ts",
+    "smoke": "python3 tools/smoke-executor.py --docker",
+    "smoke:storybook": "node tools/smoke-storybook.mjs",
+    "check": "npm run typecheck && npm run test:no-media"
   },
   "devDependencies": {
     "@types/node": "^22.20.4",

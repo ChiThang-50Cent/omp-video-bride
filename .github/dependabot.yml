@@ -19,7 +19,7 @@ updates:
       - dependency-name: ubuntu
         versions: [">24.04"]
       # This image is built by this repository, not fetched as an upstream dependency.
-      - dependency-name: omp-video-runtime
+      - dependency-name: omp-media-runtime
   - package-ecosystem: docker
     directory: /deploy/hermes
     schedule:

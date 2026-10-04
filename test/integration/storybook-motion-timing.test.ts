@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 // @ts-expect-error standalone worker JavaScript has no TypeScript declaration
-import { inspectMotionTiming } from "../../src/pipelines/hyperframes-explainer/skills/omp-storybook-pipeline/scripts/motion-timing.mjs";
+import { inspectMotionTiming } from "../../omp-skills/omp-storybook-pipeline/scripts/motion-timing.mjs";
 import { describe, it } from "vitest";
 
 interface MotionFrame { timeSec: number; x: number; y: number; rotation: number }

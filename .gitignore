@@ -3,8 +3,9 @@ data/
 node_modules/
 dist/
 *.log
+!hermes-skill/omp-orchestrator/SKILL.md
 !hermes-skill/omp-video/SKILL.md
-!src/pipelines/hyperframes-explainer/skills/omp-video-pipeline/SKILL.md
+!omp-skills/*/SKILL.md
 .env
 .env.*
 !.env.example

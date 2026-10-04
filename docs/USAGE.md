@@ -1,910 +1,269 @@
-# Docker usage guide
+# Direct executor usage guide
 
-This page is a **human-facing** API tutorial for the isolated Docker deployment. It
-starts after the Docker deployment has been bootstrapped. Follow the complete
-onboarding checklist in [`SETUP.md#docker-onboarding`](SETUP.md#docker-onboarding)
-first: it covers the checkout, external state, provider/model credentials, and
-Hermes/Telegram configuration (including the
-[`configuration-only Telegram procedure`](SETUP.md#configure-telegram-without-starting-a-second-gateway)).
-This page does not replace the API contract in [`docs/SPEC.md`](SPEC.md).
+This guide covers Hermes orchestration of pinned oh-my-pi (`omp`) 18.4.4 over the
+direct internal TCP transport.
 
-The commands below are Bash and require `jq`. They use the Compose service names
-`video-worker` and `hermes`; do not replace them with ad-hoc container names.
-Run the snippets in one shell where possible. Request and response files are
-kept under the external state directory, not in Git.
+The former HTTP bridge, SQLite job store, and webhook outbox are removed. Hermes
+directs tasks directly via the `omp-executor` plugin, managing permissions,
+briefs, and checkpoints. OMP executes tasks as the main agent, delegating focused
+tasks to subagents.
 
-## Safety and cost boundary
+## Core interaction model
 
-A build or revision invokes the configured `omp`/LLM provider and can consume
-paid provider usage. The `limits.maxUsd` and `limits.maxMinutes` fields are
-bridge-side usage/time checks: they are not a provider billing cap or a promise
-that no provider work happens before a limit is observed. Usage and tokens stay
-cumulative across continuation; if cumulative USD has exhausted the old
-`maxUsd`, an explicit manual resume must supply a higher **total** USD limit.
-There is no hard provider billing cap supplied by this bridge. Native rendering
-and stitching use FFmpeg only and do not invoke omp/LLM.
-
-The `render:false` preview still runs the storyboard, narration, frames, and
-verification steps; it only omits the final MP4 render. Native rendering of a
-ready preview does not make another LLM call.
-
-A notification, webhook, or Telegram progress message is **not** approval and
-is not authorization to resume. Do not answer a notification by approving,
-resubmitting, resuming, or starting another paid job. Submit, approve, revise,
-cancel, and manually resume only after an explicit user decision. If a request
-or response is lost, use `GET /v1/jobs/<job-id>` with the saved ID before doing
-anything else.
-
-The repository's verification boundary is explicit: Docker packaging/health
-checks have not performed a paid live provider turn or an actual Telegram send.
-Those actions require configured test credentials and explicit permission. No
-example in this document sends a Telegram message or makes a live provider
-request on the reader's behalf.
-
-## 1. Connect to the isolated Docker deployment
-
-Use the same values as the setup guide's onboarding. The API and webhook publications
-are loopback-only by default.
-
-```bash
-# Run with Bash, not sh: the bridge_api helper uses process substitution.
-export OMP_VIDEO_REPO="$HOME/code/omp-video-bridge"
-export OMP_VIDEO_STATE_DIR="$HOME/.local/state/omp-video-bridge-docker"
-export COMPOSE_PROJECT_NAME=omp-video-bridge
-export OMP_VIDEO_HTTP_PORT=18765
-export OMP_VIDEO_WEBHOOK_PORT=28644
-export BRIDGE_URL="http://127.0.0.1:$OMP_VIDEO_HTTP_PORT"
-function dc(){ docker compose -f "$OMP_VIDEO_REPO/deploy/compose.yaml" "$@"; }
-
-cd "$OMP_VIDEO_REPO"
-install -d -m 700 "$OMP_VIDEO_STATE_DIR/client"
-export CLIENT_DIR="$OMP_VIDEO_STATE_DIR/client"
-
-# This reads the generated bridge token into a short-lived curl header file.
-# The token is not an environment variable, curl argument, request body, or
-# normal command output; standard input remains available for request JSON.
-bridge_api(){ curl --silent --show-error --fail-with-body \
-  --header @<(printf 'Authorization: Bearer %s\n' \
-    "$(tr -d '\r\n' < "$OMP_VIDEO_STATE_DIR/secrets/bridge-token")") "$@"; }
-```
-
-Check the service and then the authenticated catalog. A green health response
-only proves that the service is running. It does **not** prove that provider
-credentials, a selected model, or Telegram delivery is ready.
-
-```bash
-dc ps
-curl --fail --silent --show-error "$BRIDGE_URL/v1/health" | jq .
-
-bridge_api "$BRIDGE_URL/v1/catalog" > "$CLIENT_DIR/catalog.json"
-jq -e '.pipelines | length > 0' "$CLIENT_DIR/catalog.json" >/dev/null
-jq '.pipelines[] | {pipeline, version, options}' "$CLIENT_DIR/catalog.json"
-```
-
-Select a pipeline by its exact ID, never by array position:
-
-```bash
-PIPELINE_ID=hyperframes-explainer   # or hyperframes-storybook for a storybook request
-jq -e --arg id "$PIPELINE_ID" \
-  '.pipelines[] | select(.pipeline == $id)' "$CLIENT_DIR/catalog.json" >/dev/null
-```
-
-`GET /v1/health` is the only unauthenticated route. Every other route in this
-tutorial needs the bearer header supplied by `bridge_api`. Use the selected
-pipeline's catalog to confirm the available `style`, `format`, and `voice`
-values before choosing a non-default style.
-
-### Shared polling and artifact helpers
-
-Initialize these before either workflow. Preview/native rendering requires only
-section 1 and section 3; it does not require submitting the approval example.
-The manual-resume tutorial below reuses this same token-safe `bridge_api`
-helper and `poll_job`; it never asks you to paste a bearer token or create a
-fresh submission.
-```bash
-poll_job() {
-  local id="$1" label="$2" max="${3:-240}" i=0 file state
-  while [ "$i" -lt "$max" ]; do
-    file="$CLIENT_DIR/${label}.json"
-    bridge_api "$BRIDGE_URL/v1/jobs/$id" > "$file" || return 1
-    jq -e --arg expected "$id" '.job.id == $expected' "$file" >/dev/null
-    jq -r '"job=\(.job.id) kind=\(.job.kind) state=\(.job.state) usage_usd=\(.job.usage.usd)"' "$file"
-    state=$(jq -er '.job.state' "$file")
-    case "$state" in
-      awaiting_approval|succeeded|failed|rejected|cancelled)
-        return 0
-        ;;
-      interrupted)
-        echo 'job is interrupted; automatic recovery may requeue it (at most two attempts); do not resubmit' >&2
-        return 0
-        ;;
-      queued|running)
-        ;;
-      *)
-        echo "unexpected job state: $state" >&2
-        return 1
-        ;;
-    esac
-    i=$((i + 1))
-    sleep 15
-  done
-  echo "poll limit reached for $id; inspect $CLIENT_DIR/$label.json and poll again later" >&2
-  return 2
-}
-VIDEO_DATA_ROOT=$(realpath -e -- "$OMP_VIDEO_STATE_DIR/video-data")
-
-worker_path_to_host() {
-  local api_path="$1" relative candidate
-  case "$api_path" in
-    /data/worker/*) relative=${api_path#/data/worker/} ;;
-    *) echo "refusing non-worker path: $api_path" >&2; return 1 ;;
-  esac
-  candidate=$(realpath -e -- "$VIDEO_DATA_ROOT/$relative") || {
-    echo "worker path does not exist on the host: $api_path" >&2
-    return 1
-  }
-  case "$candidate/" in
-    "$VIDEO_DATA_ROOT/"*) printf '%s\n' "$candidate" ;;
-    *) echo "refusing path outside video-data: $api_path" >&2; return 1 ;;
-  esac
-}
-```
-
-
-## 2. Submit a build that pauses for storyboard approval
-
-`POST /v1/videos` creates a one-scene project and returns all four IDs in one
-response: `.project.id`, `.scene.id`, `.version.id`, and `.job.id`. Save those
-IDs; never reconstruct one by guessing a prefix or a filesystem name. The
-optional `pipeline` field selects an exact catalog ID; omitted requests preserve
-the `hyperframes-explainer` default.
-
-The request below uses only fields accepted by the current route schema. The
-explainer pipeline accepts `style`, `format`, `voice`, `audience`, and `tone` in
-`spec`. `topic` is required; `durationSec` is in seconds. `approve` and
-`render` are job options. `metadata` is caller data echoed in webhook events.
-
-```bash
-jq -n \
-  --arg title 'Hash tables in 30 seconds' \
-  --arg topic 'Explain hash tables and collision handling' \
-  --arg brief 'Cover hash(key) modulo N, chaining, load factor, and resize.' \
-  '{
-    pipeline: "hyperframes-explainer",
-    title: $title,
-    topic: $topic,
-    brief: $brief,
-    durationSec: 30,
-    spec: {
-      style: "auto",
-      format: "landscape",
-      voice: "am_michael",
-      audience: "junior developers",
-      tone: "clear, friendly, technical"
-    },
-    approve: "storyboard",
-    render: true,
-    limits: {maxMinutes: 60, maxUsd: 5},
-    metadata: {client: "docker-usage", purpose: "storyboard-approval"}
-  }' > "$CLIENT_DIR/build-request.json"
-
-bridge_api -X POST "$BRIDGE_URL/v1/videos" \
-  -H 'Content-Type: application/json' \
-  --data-binary @"$CLIENT_DIR/build-request.json" \
-  > "$CLIENT_DIR/build-submit-response.json"
-
-jq -er '
-  [.project.id, .scene.id, .version.id, .job.id]
-  | if all(.[]; type == "string" and length > 0)
-    then @tsv
-    else error("response did not contain all four IDs")
-    end
-' "$CLIENT_DIR/build-submit-response.json" > "$CLIENT_DIR/build-ids.tsv"
-IFS=$'\t' read -r PROJECT_ID SCENE_ID VERSION_ID JOB_ID < "$CLIENT_DIR/build-ids.tsv"
-printf 'project=%s\nscene=%s\nversion=%s\njob=%s\n' \
-  "$PROJECT_ID" "$SCENE_ID" "$VERSION_ID" "$JOB_ID"
-```
-
-This is a paid-capable submission. `maxUsd: 5` is a limit check, not a hard
-provider spending guarantee. The initial response has `job.state: "queued"` or
-may already show `"running"` because the dispatcher starts work immediately.
-
-### Poll without resubmitting
-
-The bridge job states are `queued`, `running`, `awaiting_approval`, `interrupted`,
-`succeeded`, `failed`, `rejected`, and `cancelled`. The helper below polls only
-`GET`; it never approves or submits another job. It stops at an approval or
-terminal state and has a finite polling bound (240 requests at 15 seconds,
-about one hour). The awaiting-approval state has no automatic timeout, but
-`maxMinutes` measures wall-clock time since the job first started, including
-review waiting. Approval does not reset it; a late continuation can perform
-paid work before the next watcher check fails it with `limit_exceeded`.
-Choose a limit that includes review time (at most 240 minutes) and approve
-within it. If polling ends, inspect/poll the saved ID; never auto-resubmit.
-
-```bash
-
-poll_job "$JOB_ID" build-before-approval 240
-BUILD_STATE=$(jq -er '.job.state' "$CLIENT_DIR/build-before-approval.json")
-printf 'build state: %s\n' "$BUILD_STATE"
-```
-
-If the state is `interrupted`, the bridge's restart recovery normally requeues
-the same job. Do not submit a replacement. Poll the same `$JOB_ID` again. For
-`failed` or `rejected`, report `.job.error.code` and `.job.error.message`; do
-not automatically retry a paid request.
-
-### Read the approval documents safely
-
-When the state is `awaiting_approval`, the related response includes
-`.version.projectDir`. In this Docker deployment the worker returns paths below
-`/data/worker`; the host bind mount for that same tree is
-`$OMP_VIDEO_STATE_DIR/video-data`. The following mapping rejects any path that
-is not under the exact worker prefix and uses `realpath -e` containment checks
-before opening either document.
-
-```bash
-if [ "$BUILD_STATE" = awaiting_approval ]; then
-  PROJECT_DIR_API=$(jq -er '.version.projectDir' "$CLIENT_DIR/build-before-approval.json")
-
-  PROJECT_DIR_HOST=$(worker_path_to_host "$PROJECT_DIR_API")
-  PROJECT_DIR_HOST=$(realpath -e -- "$PROJECT_DIR_HOST")
-
-  read_doc() {
-    local root="$1" name="$2" real
-    real=$(realpath -e -- "$root/$name") || {
-      echo "missing approval document: $name" >&2
-      return 1
-    }
-    case "$real/" in
-      "$root/"*) cat -- "$real" ;;
-      *) echo "refusing document outside projectDir: $name" >&2; return 1 ;;
-    esac
-  }
-
-  read_doc "$PROJECT_DIR_HOST" STORYBOARD.md > "$CLIENT_DIR/STORYBOARD.md"
-  read_doc "$PROJECT_DIR_HOST" SCRIPT.md > "$CLIENT_DIR/SCRIPT.md"
-  printf 'approval documents saved under %s\n' "$CLIENT_DIR"
-  printf '\n--- STORYBOARD.md ---\n'
-  cat "$CLIENT_DIR/STORYBOARD.md"
-  printf '\n--- SCRIPT.md ---\n'
-  cat "$CLIENT_DIR/SCRIPT.md"
-fi
-```
-
-If the host user cannot traverse the bind mount, read the same files inside the
-worker instead. Pass the API-returned path as an argument (not as shell source)
-and keep the realpath check inside the container:
-
-```bash
-# PROJECT_DIR_API must come from GET /v1/jobs/$JOB_ID, as above.
-dc exec -T video-worker node --input-type=module - \
-  "$PROJECT_DIR_API" STORYBOARD.md <<'NODE'
-import { realpathSync, readFileSync } from "node:fs";
-import { join, sep } from "node:path";
-const [projectArg, name] = process.argv.slice(-2);
-const root = realpathSync(projectArg);
-const file = realpathSync(join(root, name));
-if (!file.startsWith(root + sep)) throw new Error("document escaped projectDir");
-process.stdout.write(readFileSync(file, "utf8"));
-NODE
-```
-
-For Hermes, the same relative path is mounted read-only as `/videos-v2`: replace
-only the verified `/data/worker` prefix with `/videos-v2`. Do not give Hermes a
-host path or an unverified path. The worker's `/data/worker` and Hermes's
-`/videos-v2` are two container views of the host
-`$OMP_VIDEO_STATE_DIR/video-data` bind mount.
-
-### Approve with explicit notes, then finish the render
-
-Review the storyboard and script before this step. The approval endpoint accepts
-only optional `notes` and continues the **same** job/session; it does not create
-a new job or version. A notification must not be treated as approval.
-
-```bash
-jq -n \
-  --arg notes 'Approved. Keep the hash(key) modulo N example; make the resize transition explicit.' \
-  '{notes: $notes}' > "$CLIENT_DIR/approve.json"
-
-bridge_api -X POST "$BRIDGE_URL/v1/jobs/$JOB_ID/approve" \
-  -H 'Content-Type: application/json' \
-  --data-binary @"$CLIENT_DIR/approve.json" \
-  > "$CLIENT_DIR/approve-response.json"
-jq -e --arg id "$JOB_ID" '.job.id == $id' "$CLIENT_DIR/approve-response.json" >/dev/null
-jq '{id: .job.id, state: .job.state, phase: .job.phase, approvalNotes: .job.approvalNotes}' \
-  "$CLIENT_DIR/approve-response.json"
-
-poll_job "$JOB_ID" build-after-approval 240
-```
-
-For a successful `render:true` build, the completion response has
-`.job.result` with `versionId`, `video`, `contactSheets`, `durationSec`,
-`notes`, and `framesChanged`. The same `versionId` must match the saved version
-ID. Retrieve and copy the published MP4 and contact sheets only after this gate:
-
-```bash
-jq -e --arg vid "$VERSION_ID" '
-  .job.state == "succeeded"
-  and .job.result.versionId == $vid
-  and (.job.result.video | type == "string" and length > 0)
-  and (.job.result.contactSheets | type == "array" and length > 0)
-' "$CLIENT_DIR/build-after-approval.json" >/dev/null
-
-OUTPUT_DIR="$CLIENT_DIR/output-$VERSION_ID"
-install -d -m 700 "$OUTPUT_DIR"
-VIDEO_API_PATH=$(jq -er '.job.result.video' "$CLIENT_DIR/build-after-approval.json")
-VIDEO_HOST_PATH=$(worker_path_to_host "$VIDEO_API_PATH")
-cp -- "$VIDEO_HOST_PATH" "$OUTPUT_DIR/final.mp4"
-
-n=0
-while IFS= read -r CONTACT_API_PATH; do
-  n=$((n + 1))
-  cp -- "$(worker_path_to_host "$CONTACT_API_PATH")" \
-    "$OUTPUT_DIR/contact-sheet-$n.jpg"
-done < <(jq -er '.job.result.contactSheets[]' "$CLIENT_DIR/build-after-approval.json")
-
-printf 'MP4: %s\n' "$OUTPUT_DIR/final.mp4"
-printf 'contact sheets: %s\n' "$OUTPUT_DIR/contact-sheet-*.jpg"
-jq '{id: .job.id, state: .job.state, usage: .job.usage, result: .job.result}' \
-  "$CLIENT_DIR/build-after-approval.json"
-```
-
-The paths in the HTTP response are worker paths. `worker_path_to_host` maps and
-checks them before copying. In Hermes, the corresponding MP4/contact-sheet
-paths are `/videos-v2/<relative path>` and are read-only. The bridge publishes
-only intended artifacts (MP4, contact sheets, captions, and approval documents)
-for the different Hermes UID; private sessions and configuration files are not
-published.
-
-### Storybook pipeline
-
-Use `pipeline: "hyperframes-storybook"` for an explicitly requested storybook;
-never choose it from the catalog's array position or infer it from a keyword.
-The supported profile is `style: "storybook-flat"` with explicit
-`format`, `voice`, `audience`, and `tone`, `narrationMode: "verbatim"` by
-default, and `music: "required"` by default (`"none"` only when requested).
-Preserve the user's story text and scene beats in `topic`/`brief`. The
-storybook workflow starts with complete reusable character image files and
-recurring background image files, inspects a still establishing-frame
-composition, and then uses sparse whole-character slides and slight tilts.
-Supplied or authorized artwork is allowed; this workflow does not require
-programmatic primitive drawing, paid generation, or fake placeholders. It is
-not generated cinematography or photoreal live action.
-
-When a story uses supplied files, create the project, upload every real
-character and background asset, and only then create/build its scenes. Reuse the
-same uploaded files for every shot that uses them. Do not put a host path or
-`metadata.localProjectDir` in the request; metadata does not transfer files:
-```bash
-jq -n '{
-  name: "The seed grows",
-  pipeline: "hyperframes-storybook",
-  brief: "A gentle story about patience and growth.",
-  spec: {
-    style: "storybook-flat", format: "landscape", voice: "am_michael",
-    audience: "young children", tone: "warm and calm",
-    narrationMode: "verbatim", music: "required"
-  }
-}' > "$CLIENT_DIR/storybook-project.json"
-bridge_api -X POST "$BRIDGE_URL/v1/projects" \
-  -H 'Content-Type: application/json' \
-  --data-binary @"$CLIENT_DIR/storybook-project.json" \
-  > "$CLIENT_DIR/storybook-project-response.json"
-STORY_PROJECT_ID=$(jq -er '.project.id' "$CLIENT_DIR/storybook-project-response.json")
-
-bridge_api -X POST \
-  "$BRIDGE_URL/v1/projects/$STORY_PROJECT_ID/assets?name=character.png&tags=character" \
-  --data-binary @/path/to/character.png \
-  > "$CLIENT_DIR/storybook-character-response.json"
-STORY_CHARACTER_ID=$(jq -er '.asset.id' "$CLIENT_DIR/storybook-character-response.json")
-bridge_api -X POST \
-  "$BRIDGE_URL/v1/projects/$STORY_PROJECT_ID/assets?name=fireplace-room.webp&tags=background" \
-  --data-binary @/path/to/fireplace-room.webp \
-  > "$CLIENT_DIR/storybook-background-response.json"
-STORY_BACKGROUND_ID=$(jq -er '.asset.id' "$CLIENT_DIR/storybook-background-response.json")
-```
-
-Create an API scene with `assets: [$STORY_CHARACTER_ID, $STORY_BACKGROUND_ID]` and
-build it only after both uploads succeed. Before motion, the worker creates
-`storybook.json` with root `characters` and `backgrounds` entries (local
-PNG/WebP/SVG paths, positive authored character dimensions) and shots that
-select a background ID plus cast entries with bottom-center canvas anchors.
-Inspect the still establishing frame in the real browser first; then reuse the
-same files and apply only finite whole-image x/y slides and small rotations
-across measured VO/word spans, returning to neutral when each utterance ends.
-Do not rock through silent padded time. Absent motion means completely still.
-One API scene can contain several
-internal storybook shots; do not create or report one API scene per internal
-shot. A user who already authorized production does not need an extra approval
-gate unless they asked for one. On delivery, inspect the storybook project's
-acceptance.json through the verified worker/Hermes path mapping and inspect
-`.hyperframes/storybook-audit.json`,
-`.hyperframes/storybook-audit/contact.json`, and the single required
-`.hyperframes/storybook-audit/visual-review.json`. It must bind its
-`sourceDigest` to the current audit evidence, reference only emitted evidence
-files, and contain substantive style/continuity/acting/captions observations for
-every internal shot. The contact report remains `review-required`;
-`succeeded` alone is not an aesthetic review or a delivery certificate.
-
-## 3. Preview first, then use the native render job
-
-Use a separate submission when you want to inspect contact sheets before
-spending compute on the native render step. This is **not** a no-cost build: storyboard, narration,
-frame, and verification work still runs. `render:false` is a truthful output
-gate: the build must succeed with `.job.result.video == null` and the version
-must be ready with contact sheets before the native render endpoint is called.
-
-```bash
-jq -n \
-  '{
-    title: "Hash tables preview",
-    topic: "Explain hash tables and collision handling",
-    brief: "Show chaining and load-factor resize with a compact example.",
-    durationSec: 30,
-    spec: {
-      style: "auto",
-      format: "landscape",
-      voice: "am_michael",
-      audience: "junior developers",
-      tone: "clear, friendly, technical"
-    },
-    render: false,
-    limits: {maxMinutes: 60, maxUsd: 5},
-    metadata: {client: "docker-usage", purpose: "preview-before-native-render"}
-  }' > "$CLIENT_DIR/preview-request.json"
-
-bridge_api -X POST "$BRIDGE_URL/v1/videos" \
-  -H 'Content-Type: application/json' \
-  --data-binary @"$CLIENT_DIR/preview-request.json" \
-  > "$CLIENT_DIR/preview-submit-response.json"
-jq -er '
-  [.project.id, .scene.id, .version.id, .job.id]
-  | if all(.[]; type == "string" and length > 0) then @tsv
-    else error("preview response did not contain all four IDs") end
-' "$CLIENT_DIR/preview-submit-response.json" > "$CLIENT_DIR/preview-ids.tsv"
-IFS=$'\t' read -r PREVIEW_PROJECT_ID PREVIEW_SCENE_ID PREVIEW_VERSION_ID PREVIEW_JOB_ID \
-  < "$CLIENT_DIR/preview-ids.tsv"
-printf 'preview project=%s\npreview scene=%s\npreview version=%s\npreview job=%s\n' \
-  "$PREVIEW_PROJECT_ID" "$PREVIEW_SCENE_ID" "$PREVIEW_VERSION_ID" "$PREVIEW_JOB_ID"
-
-poll_job "$PREVIEW_JOB_ID" preview-build 240
-jq -e --arg vid "$PREVIEW_VERSION_ID" '
-  .job.state == "succeeded"
-  and .job.result.versionId == $vid
-  and .job.result.video == null
-  and (.job.result.contactSheets | type == "array" and length > 0)
-' "$CLIENT_DIR/preview-build.json" >/dev/null
-
-bridge_api "$BRIDGE_URL/v1/versions/$PREVIEW_VERSION_ID" \
-  > "$CLIENT_DIR/preview-version-before-render.json"
-jq -e '
-  .version.state == "ready"
-  and .version.outputs.video == null
-  and (.version.outputs.contactSheets | type == "array" and length > 0)
-' "$CLIENT_DIR/preview-version-before-render.json" >/dev/null
-```
-
-Only after that gate, submit the native render. Its request schema is
-`{metadata?: object}` and its response is `{job}`. The native render job has
-`kind: "render"`, `maxUsd: 0`, and does not invoke the LLM.
-
-```bash
-jq -n '{metadata: {client: "docker-usage", purpose: "native-render"}}' \
-  > "$CLIENT_DIR/native-render-request.json"
-bridge_api -X POST "$BRIDGE_URL/v1/versions/$PREVIEW_VERSION_ID/render" \
-  -H 'Content-Type: application/json' \
-  --data-binary @"$CLIENT_DIR/native-render-request.json" \
-  > "$CLIENT_DIR/native-render-submit-response.json"
-NATIVE_JOB_ID=$(jq -er '.job.id' "$CLIENT_DIR/native-render-submit-response.json")
-jq -e --arg vid "$PREVIEW_VERSION_ID" \
-  '.job.kind == "render" and .job.refs.versionId == $vid' \
-  "$CLIENT_DIR/native-render-submit-response.json" >/dev/null
-printf 'native render job=%s\n' "$NATIVE_JOB_ID"
-
-poll_job "$NATIVE_JOB_ID" native-render 240
-jq -e --arg vid "$PREVIEW_VERSION_ID" '
-  .job.state == "succeeded"
-  and .job.result.versionId == $vid
-  and (.job.result.video | type == "string" and length > 0)
-' "$CLIENT_DIR/native-render.json" >/dev/null
-
-# Native render result intentionally omits contactSheets. Fetch the version.
-bridge_api "$BRIDGE_URL/v1/versions/$PREVIEW_VERSION_ID" \
-  > "$CLIENT_DIR/preview-version-after-render.json"
-jq -e '
-  .version.state == "ready"
-  and (.version.outputs.video | type == "string" and length > 0)
-  and (.version.outputs.contactSheets | type == "array" and length > 0)
-' "$CLIENT_DIR/preview-version-after-render.json" >/dev/null
-
-NATIVE_OUTPUT_DIR="$CLIENT_DIR/output-$PREVIEW_VERSION_ID-native"
-install -d -m 700 "$NATIVE_OUTPUT_DIR"
-NATIVE_VIDEO_API_PATH=$(jq -er '.job.result.video' "$CLIENT_DIR/native-render.json")
-NATIVE_VIDEO_HOST_PATH=$(worker_path_to_host "$NATIVE_VIDEO_API_PATH")
-cp -- "$NATIVE_VIDEO_HOST_PATH" "$NATIVE_OUTPUT_DIR/final.mp4"
-n=0
-while IFS= read -r CONTACT_API_PATH; do
-  n=$((n + 1))
-  cp -- "$(worker_path_to_host "$CONTACT_API_PATH")" \
-    "$NATIVE_OUTPUT_DIR/contact-sheet-$n.jpg"
-done < <(jq -er '.version.outputs.contactSheets[]' "$CLIENT_DIR/preview-version-after-render.json")
-printf 'native MP4: %s\n' "$NATIVE_OUTPUT_DIR/final.mp4"
-printf 'native contact sheets: %s\n' "$NATIVE_OUTPUT_DIR/contact-sheet-*.jpg"
-
-```
-
-Copy `.job.result.video` from the native job through the same
-`worker_path_to_host` check. Read contact sheets from
-`.version.outputs.contactSheets` in the version response, not from the native
-job result. A second native render of a version that already has a video is a
-`409 already_rendered`; a preview that is not ready is a `409 version_not_ready`.
-Do not turn either response into another build submission.
-
-## 4. Revise a known scene/version
-
-Every revision creates a **new** version and a new job. The route is
-`POST /v1/scenes/<scene-id>/revise`; `instructions` is required (3–4000
-characters). `frames`, `durationSec`, `fromVersionId`, `metadata`, `limits`, and
-`render` are optional. Supplying `fromVersionId` makes the base explicit and
-prevents selecting the wrong version when a scene has history.
-
-This example uses the IDs saved from the approved `render:true` flow. Use a
-ready version from either flow, but replace the variables with that flow's
-saved IDs rather than guessing.
-
-```bash
-# These are the IDs from build-ids.tsv and are intentionally explicit.
-IFS=$'\t' read -r PROJECT_ID SCENE_ID BASE_VERSION_ID BASE_BUILD_JOB_ID \
-  < "$CLIENT_DIR/build-ids.tsv"
-
-jq -n \
-  --arg instructions 'Frame 5: separate the three collision-handling pills; keep all other frames unchanged.' \
-  --arg base "$BASE_VERSION_ID" \
-  '{
-    instructions: $instructions,
-    frames: [5],
-    fromVersionId: $base,
-    render: true,
-    limits: {maxMinutes: 60, maxUsd: 5},
-    metadata: {client: "docker-usage", purpose: "revision"}
-  }' > "$CLIENT_DIR/revise-request.json"
-
-bridge_api -X POST "$BRIDGE_URL/v1/scenes/$SCENE_ID/revise" \
-  -H 'Content-Type: application/json' \
-  --data-binary @"$CLIENT_DIR/revise-request.json" \
-  > "$CLIENT_DIR/revise-response.json"
-REVISE_JOB_ID=$(jq -er '.job.id' "$CLIENT_DIR/revise-response.json")
-REVISE_VERSION_ID=$(jq -er '.version.id' "$CLIENT_DIR/revise-response.json")
-jq -e --arg base "$BASE_VERSION_ID" --arg scene "$SCENE_ID" \
-  '.job.kind == "revise"
-   and .job.refs.sceneId == $scene
-   and .version.parentVersionId == $base' \
-  "$CLIENT_DIR/revise-response.json" >/dev/null
-printf 'revision job=%s\nrevision version=%s\nbase version=%s\n' \
-  "$REVISE_JOB_ID" "$REVISE_VERSION_ID" "$BASE_VERSION_ID"
-
-poll_job "$REVISE_JOB_ID" revise 240
-jq -e --arg vid "$REVISE_VERSION_ID" '
-  .job.state == "succeeded"
-  and .job.result.versionId == $vid
-  and (.job.result.video | type == "string" and length > 0)
-' "$CLIENT_DIR/revise.json" >/dev/null
-```
-
-A successful revision has the same build/revise result fields as the original
-build, including the new `.job.result.video` and `.job.result.contactSheets`.
-Use `GET /v1/versions/$REVISE_VERSION_ID` and the same path-containment copy
-procedure to retrieve them. The old version remains available. If the revision
-is rejected because it requests a new style/format or another unsupported
-restructure, report `.job.error.message`; do not silently submit a new video.
-
-## 5. Cancel a nonterminal job
-
-`POST /v1/jobs/<job-id>/cancel` accepts `{reason?: string}` and returns
-`{job}`. Use the exact job ID returned by the submission you intend to stop.
-For a queued or approval-waiting job, the response normally is already
-`cancelled`. For a running job, the first response can still show `running`
-while the worker is being stopped; poll that same ID until `cancelled`. A
-terminal job returns `409 job_finished`; inspect it and do not retry the cancel
-or submit a replacement.
-
-The following cancels the revision created above. Run it only if that is the
-user's explicit decision; do not run it if you want the revision to finish.
-
-```bash
-jq -n --arg reason 'User cancelled before the revision completed.' \
-  '{reason: $reason}' > "$CLIENT_DIR/cancel-request.json"
-bridge_api -X POST "$BRIDGE_URL/v1/jobs/$REVISE_JOB_ID/cancel" \
-  -H 'Content-Type: application/json' \
-  --data-binary @"$CLIENT_DIR/cancel-request.json" \
-  > "$CLIENT_DIR/cancel-response.json"
-jq -e --arg id "$REVISE_JOB_ID" '.job.id == $id' "$CLIENT_DIR/cancel-response.json" >/dev/null
-jq '{id: .job.id, kind: .job.kind, state: .job.state, error: .job.error}' \
-  "$CLIENT_DIR/cancel-response.json"
-
-# If the response was still running, this observes the same job; it does not resubmit.
-poll_job "$REVISE_JOB_ID" revise-after-cancel 240
-```
-
-Cancelling a build/revision leaves its pending version failed. Do not create a
-new revision or fresh build automatically; if the user later explicitly wants
-to continue the same cancelled, failed, or interrupted job, use the manual
-resume procedure below after its guards pass. Cancelling an approval-waiting
-build is the supported way to decline it. There is no `POST /reject` user
-endpoint: `rejected` is a pipeline outcome (for example, an unsupported
-restructure), not a command to fabricate in a client.
-
-## 6. Explicitly resume one saved job
-
-Manual resume is a user-authorized continuation, not a retry button. It is
-allowed for the same `build`, `revise`, `render`, or `stitch` job when its
-saved state is `failed`, `cancelled`, or `interrupted`. It keeps the same job,
-project, scene, version, inputs, metadata, phase, approval notes, and history.
-For build/revise it reuses the original workdir/main session; render requires
-the original ready preview/project directory with no video; stitch rechecks the
-current timeline/scenes. It never creates a fresh submission or silently
-chooses a new session. For `build` and `revise`, this is an explicit **paid
-continuation**; native `render` and `stitch` continuation uses FFmpeg and does
-not invoke omp.
-
-Only run the following after the user has explicitly named the saved job and
-authorized continuation. A failure notification, `job.failed` webhook, or
-Telegram message is not that authorization. This example reuses the
-token-safe `bridge_api` and `poll_job` helpers from section 1; it does not
-print, export, or paste a bearer token.
-
-```bash
-# Set this from a saved submit/GET response; never guess an ID.
-: "${JOB_ID:?set JOB_ID to the exact saved job ID}"
-RESUME_BEFORE="$CLIENT_DIR/manual-resume-before.json"
-bridge_api "$BRIDGE_URL/v1/jobs/$JOB_ID?events=1" > "$RESUME_BEFORE"
-
-JOB_STATE=$(jq -er '.job.state' "$RESUME_BEFORE")
-JOB_KIND=$(jq -er '.job.kind' "$RESUME_BEFORE")
-case "$JOB_STATE" in
-  failed|cancelled|interrupted) ;;
-  *) echo "manual resume is not allowed from state: $JOB_STATE" >&2; exit 1 ;;
-esac
-case "$JOB_KIND" in
-  build|revise|render|stitch) ;;
-  *) echo "unexpected job kind: $JOB_KIND" >&2; exit 1 ;;
-esac
-
-# Keep the IDs, refs, current usage, and existing limits visible for the
-# explicit decision. Do not edit refs or use a newer version by guessing.
-jq '{
-  id: .job.id, kind: .job.kind, state: .job.state, refs: .job.refs,
-  phase: .job.phase, approvalNotes: .job.approvalNotes,
-  usage: .job.usage, limits: .job.limits,
-  manual_resume_events: [(.events // [])[] | select(.type == "manual_resume")]
-}' "$RESUME_BEFORE"
-
-read -r -p "Type RESUME to authorize continuing this exact $JOB_KIND job (paid for build/revise): " CONFIRM
-[ "$CONFIRM" = RESUME ] || { echo "not authorized; no request sent" >&2; exit 1; }
-
-# Empty limits reuses both old limits. The endpoint validates the body before
-# changing state. This is still paid work for build/revise.
-printf '{}\n' > "$CLIENT_DIR/manual-resume-request.json"
-
-# If cumulative usage has exhausted the old USD limit, do not lower it or
-# pretend it is a fresh budget. Replace the body with a higher TOTAL (1..50):
-# TOTAL_USD=10
-# jq -n --argjson total "$TOTAL_USD" \
-#   '{limits: {maxUsd: $total}}' > "$CLIENT_DIR/manual-resume-request.json"
-#
-# To replace only the time limit, use a positive total <= 240 minutes:
-# jq -n '{limits: {maxMinutes: 120}}' > "$CLIENT_DIR/manual-resume-request.json"
-# Native render/stitch jobs keep maxUsd: 0; do not add maxUsd to their body.
-
-bridge_api -X POST "$BRIDGE_URL/v1/jobs/$JOB_ID/resume" \
-  -H 'Content-Type: application/json' \
-  --data-binary @"$CLIENT_DIR/manual-resume-request.json" \
-  > "$CLIENT_DIR/manual-resume-response.json"
-jq -e --arg id "$JOB_ID" '.job.id == $id' \
-  "$CLIENT_DIR/manual-resume-response.json" >/dev/null
-jq '{id: .job.id, kind: .job.kind, state: .job.state, phase: .job.phase,
-     usage: .job.usage, limits: .job.limits}' \
-  "$CLIENT_DIR/manual-resume-response.json"
-
-# Poll the same ID. This GET-only helper never submits a replacement.
-poll_job "$JOB_ID" manual-resume 240
-bridge_api "$BRIDGE_URL/v1/jobs/$JOB_ID?events=1" \
-  > "$CLIENT_DIR/manual-resume-after.json"
-jq '{
-  id: .job.id, state: .job.state, usage: .job.usage, error: .job.error,
-  result: .job.result,
-  manual_resume_events: [(.events // [])[] | select(.type == "manual_resume")]
-}' "$CLIENT_DIR/manual-resume-after.json"
-```
-
-The endpoint returns `200 {job}` with the same ID when accepted. Limits are
-optional and each supplied field replaces only that field: `maxMinutes` is
-positive and at most 240, while `maxUsd` is positive and at most 50. The time
-window is fresh **only for manual resume** (`startedAt` is reset before the
-next start); usage and tokens remain cumulative. A higher USD value is a higher
-total limit, not an amount added to prior spend, and the bridge cannot hard-cap
-provider billing or in-flight usage. Polling and finalization cannot decrease
-persisted USD or token totals. Preserve the worker/session usage logs needed to
-account cumulative totals; if persisted totals exceed those logs, manual resume
-is rejected before mutation rather than silently starting a new job.
-
-The endpoint validates before mutation. `409 not_resumable` means the job is
-queued, running, awaiting approval, succeeded, or rejected. For an existing
-job, `409 resume_unavailable` covers missing or mismatched project, scene,
-version, timeline, revision parent, newer ready version, required omp
-workdir/main session, or incomplete persisted usage history. An unknown job ID
-retains normal `not_found`. `409 budget_exhausted` means cumulative USD has
-reached the effective total; `409 job_busy` means the target is locally
-running; `409 scene_busy` means another job is active on the scene; `409
-project_busy` means a project stitch or other project work conflicts; and
-`409 already_rendered` means a native render already has a video. Invalid
-limits or a USD edit on native render/stitch returns `400 invalid_request`.
-All of these guards leave state, history, versions, and outbox unchanged.
-Deleted references, ready-version overwrites, conflicting work, incomplete
-usage logs, and stale render/timeline inputs are guards, not reasons to submit
-a fresh job. Build/revise restores the existing pending/failed version with
-notes cleared; stitch rechecks and reruns the **current** timeline/scenes.
-
-The persisted `manual_resume` event records the explicit API action. The
-`job.resumed` webhook reports continuation for that action; automatic restart
-recovery can also report `job.resumed`, but is limited to two attempts and keeps
-the original time window. Neither event is approval or an instruction to
-submit, retry, or resume another job. If polling reaches its local bound,
-inspect the saved response and poll the same ID later; never fall back to a
-fresh `POST /v1/videos`, build, revise, render, or stitch.
-
-## 7. Using the bot through Telegram
-
-This section is for the **person requesting a video**, not for configuring the
-agent. The agent-only skill is
-[`hermes-skill/omp-video/SKILL.md`](../hermes-skill/omp-video/SKILL.md); it
-contains tool permissions, path translation, and sender details that users
-should not copy as shell commands. The setup guide's
-[`configuration-only Telegram procedure`](SETUP.md#configure-telegram-without-starting-a-second-gateway)
-must configure the bot before exactly one gateway is started. Do not run a
-second polling gateway with the same token; use a separate test bot or an
-explicit cutover.
-
-### Request a video
-
-Give the bot enough information to form the API fields:
-
-- subject/topic and the intended audience;
-- approximate length (the API accepts `durationSec` 10–300; the HyperFrames
-  catalog currently advertises 15–180);
-- output format: `landscape` (1920×1080), `portrait` (1080×1920), or `square`
-  (1080×1080);
-- whether to pause for storyboard approval before production; and
-- any concrete style, voice, frame, or content constraints.
-
-For example:
-
-> Create a 30-second English explainer for junior developers about hash-table
-> collisions. Use landscape format, a clear technical tone, and pause after the
-> storyboard so I can review it. Do not start production until I explicitly
-> approve the storyboard.
-
-The bot should confirm the chosen spec and return a job ID/scene ID/version ID
-(or quote the message that contains them). A build may queue behind other work;
-there is no guaranteed completion time. Do not promise a fixed number of minutes
-without a current benchmark and provider availability.
-
-### Explicit manual resume requests
-
-If an existing job is `failed`, `cancelled`, or `interrupted`, manual
-continuation requires a new, explicit user instruction naming its exact job
-ID. A safe request is:
-
-> Resume the same job `job_…` (do not create a fresh submission). I authorize
-> paid continuation for this build/revise job. Reuse its limits.
-
-If the old USD total is exhausted, name a higher **total** explicitly:
-
-> Resume `job_…` with a total `maxUsd` of 10 and the existing time limit. Do
-> not reset or hide cumulative usage.
-
-The bot must inspect the saved job and confirm its kind (`build`, `revise`,
-`render`, or `stitch`) and state before calling `/v1/jobs/<id>/resume`. It must
-not call this endpoint for `queued`, `running`, `awaiting_approval`, succeeded,
-or rejected jobs, and must not fall back to a new `/videos`, build, revise,
-render, or stitch request. Build/revise continuation may incur provider cost;
-native render/stitch does not invoke omp. Deleted references, ready-version
-overwrites, missing sessions, and conflicting current work remain guards.
-
-An automatic `job.resumed` notification after bridge restart is different: it
-reports bounded crash recovery (at most two attempts, original time window)
-and requires no user action. A `manual_resume` history event plus the same
-`job.resumed` webhook identifies an explicit continuation. Neither notification
-is approval or authorization to resume another job.
-
-### Approval, changes, and cancellation
-
-When the bot presents the storyboard/script and says the job is
-`awaiting_approval`, review those documents. Reply explicitly to that message,
-for example:
-
-> Approve job `job_…` with these notes: make the resize transition explicit and
-> keep the final example.
-
-Only that explicit instruction should cause the bot to call
-`POST /v1/jobs/<id>/approve` with `{ "notes": "…" }`. A progress notification
-alone is never approval.
-
-There is no implemented manual reject endpoint or guaranteed `/reject` chat
-command. If you do not want to continue, tell the bot explicitly to cancel the
-job (or cancel the known `job_…`); the bot should use the real cancel endpoint.
-A `rejected` status may still appear when the pipeline rejects an unsupported
-revision/restructure; that is different from a user rejecting a storyboard.
-
-To request a revision, reply to the bot's MP4/contact-sheet message and name
-what to change, preferably by contact-sheet frame number:
-
-> Revise scene `scn_…`, version `ver_…`: in frame 5, separate the three pills;
-> keep the narration and format.
-
-Replying to the message is useful, but the scene ID is the API routing key and
-the version ID identifies the exact base. If several videos are in the chat,
-include both IDs; never guess between them. Each revision gets a new version
-and job, while the old version remains available. To stop work, reply with
-`cancel job job_…` or clearly ask the bot to cancel the referenced job.
-
-### What the bot can deliver
-
-Expect progress or error messages keyed by the job ID. The implemented webhook
-and job lifecycle events include `job.started`, `job.awaiting_approval`,
-`job.succeeded`, `job.failed`, `job.rejected`, `job.cancelled`, and
-`job.resumed`. On success, the bot can deliver the MP4 and contact sheet(s),
-with the project/scene/version IDs in the caption so a later reply targets the
-right video. On failure, it should report the job error code/message and not
-silently resubmit. `job.resumed` may report bounded automatic recovery after a
-restart or an explicitly authorized manual continuation; inspect the saved
-job/history to distinguish them. It is not a request for approval or a reason
-to start another job. The persisted `manual_resume` event records only the
-explicit manual API action.
-
-Delivery depends on the configured Hermes route, Telegram credentials, and
-readability of the `/videos-v2` read-only mount. A sender may report partial
-attachment failures even when its overall response says `success:true`; the
-bot should identify which artifact was actually delivered. Timing is not
-guaranteed: queue depth, provider work, CPU rendering, network/font downloads,
-and Telegram availability all affect completion.
-
-## 8. Troubleshooting and contract links
-
-- **401:** use the `bridge_api` helper and confirm the Docker bootstrap created
-  `$OMP_VIDEO_STATE_DIR/secrets/bridge-token`; do not paste the token into a
-  command, an environment variable, or a log. `/v1/health` intentionally does
-  not require it.
-- **Healthy containers but no useful video:** health is process health, not
-  provider/model readiness. Recheck the provider login and bridge
-  `runner.defaultModel` in `worker-config.json`, then follow the [setup guide's reload](SETUP.md#8-recreate-the-configured-services)
-  procedure; do not resubmit the paid job merely because health is green.
-- **OAuth/quota/model errors:** inspect `.job.error` from the saved job response,
-  verify the configured account's supported catalog/model, and make a deliberate
-  new request only after the cause is fixed.
-- **Telegram `409 Conflict`:** only one gateway may poll a bot token. Stop the
-  competing gateway or use a separate test bot; do not keep two pollers running.
-- **Unreadable attachments:** verify the `/data/worker` → host
-  `video-data` → Hermes `/videos-v2` mapping and permissions. Do not expose
-  private sessions/configuration just to make an attachment readable.
-
-For exact request schemas, errors, state transitions, storage paths, and Docker
-mounts, use [`docs/SPEC.md`](SPEC.md) and [`src/http/routes.ts`](../src/http/routes.ts)
-as the source of truth. The route summary is:
+Hermes communicates with OMP inside the Docker Compose network over internal TCP
+port 9876.
 
 ```text
-POST /v1/videos                         -> {project, scene, job, version}
-GET  /v1/jobs/:id                       -> {job, version, events?}
-POST /v1/jobs/:id/approve               -> {job}
-POST /v1/jobs/:id/cancel                -> {job}
-POST /v1/jobs/:id/resume                -> {job}
-POST /v1/scenes/:id/revise              -> {job, version}
-GET  /v1/versions/:id                   -> {version}
-POST /v1/versions/:id/render            -> {job}
+Hermes Conversation
+  │
+  ├─> 1. omp_sessions: inspect available owner-wide sessions
+  ├─> 2. omp_open: open new session or resume exact session ID/file
+  ├─> 3. omp_rpc: submit commands (prompt, get_state, set_model, etc.)
+  ├─> 4. omp_events: stream events and poll for settlement
+  ├─> 5. omp_respond: answer interactive confirmations or host tool requests
+  └─> 6. omp_close: gracefully disconnect when finished
+```
 
-These examples do not change runtime code or dependency pins. Lifecycle
-requests mutate persistent job/project state; build, revision, approval
-continuation, and an explicitly authorized manual resume can invoke paid
-provider work when the reader explicitly runs them. Native render/stitch work
-does not invoke omp.
+## Hermes `omp-executor` tools
+
+The plugin exposes 6 tools covering all 48 pinned native OMP 18.4.4 RPC commands:
+
+| Tool | Arguments | Description |
+|---|---|---|
+| `omp_sessions` | `offset` (optional, default 0), `limit` (optional, 1–100, default 50) | List owner-visible sessions across workspaces, ordered newest first, with `session_id`, `session_file`, `cwd`, and timestamps. |
+| `omp_open` | `mode` (required: `"new"` or `"resume"`), `executor` (optional, default `"default"`), `session_id` (optional), `session_file` (optional), `cwd` (optional), `model` (optional), `thinking` (optional) | Connect to OMP. `mode: "new"` starts a fresh session; `mode: "resume"` resumes an exact session ID or file. |
+| `omp_rpc` | `command` (required), `params` (optional), `executor` (optional) | Submit any pinned native OMP command asynchronously. Returns `request_id` and `submitted: true`. |
+| `omp_events` | `executor` (optional), `after` (optional cursor), `limit` (optional, up to 1000) | Replay native event stream sequentially. Provides active side-channel requests and settlement state. |
+| `omp_respond` | `response` (required object), `executor` (optional) | Answer active UI prompts (confirmations, choices, input) or host-tool requests. |
+| `omp_close` | `executor` (optional) | Close connection and stop the active OMP process. Session history remains durable. |
+
+*Note: The native `get_available_commands` RPC command lists active extension,
+prompt, and skill commands registered in the current session; it does not list
+the complete set of 48 underlying native protocol methods exposed by `omp_rpc`.*
+
+### Logical executors and scoping
+
+The `executor` argument specifies a logical channel (such as `"default"` or
+`"review"`). Handles are scoped to the Hermes conversation plus the executor name,
+preventing cross-conversation collisions. Session history itself is owner-wide:
+any Hermes conversation may explicitly resume an existing session by ID.
+
+## Session management and exact resume
+
+### Listing sessions
+
+```json
+{
+  "offset": 0,
+  "limit": 20
+}
+```
+
+The response includes an array of sessions with `session_id`, `session_file`,
+`name`, `cwd`, and `modified_at`.
+
+### Starting a new session
+
+```json
+{
+  "mode": "new",
+  "cwd": "/data/executor/workspaces/project-alpha"
+}
+```
+
+### Exact session resume
+
+To continue previous work:
+
+```json
+{
+  "mode": "resume",
+  "session_id": "session-20261003-example"
+}
+```
+
+**Resumption rules:**
+- `mode: "resume"` requires an exact `session_id` or indexed `session_file`.
+- Corrupt, missing, or ambiguous session references fail immediately.
+- There is **no automatic fallback** to a new session or the most recent session.
+- Resume restores the recorded worker working directory and saved model/thinking
+  settings unless explicit overrides are passed.
+
+## Executing tasks and streaming events
+
+### 1. Sending a prompt
+
+```json
+{
+  "command": "prompt",
+  "params": {
+    "message": "Review PROJECT_DIR/production-contract.json and generate initial character sketches."
+  }
+}
+```
+
+OMP returns `{ "request_id": "req-001", "submitted": true }`.
+### 2. Streaming events and polling settlement
+
+Hermes streams execution progress by calling `omp_events` with the returned cursor:
+
+```json
+{
+  "after": 0,
+  "limit": 100
+}
+```
+
+Replay records include the native event stream (`message_chunk`, `tool_call`,
+`agent_end`, `prompt_result`).
+
+- `session_settled: true` indicates OMP has finished all queued and background tasks.
+- Authoritative state can be queried at any time using `get_state`.
+- If `prompt_result` reports an error, Hermes inspects the error and decides next
+  steps; there is no automatic paid retry.
+
+### 3. Handling interactive confirmations
+
+If OMP pauses for confirmation, the request appears in `pending_requests` inside
+`omp_events`. Hermes answers using `omp_respond`:
+
+```json
+{
+  "response": {
+    "type": "extension_ui_response",
+    "id": "ui-prompt-001",
+    "confirmed": true
+  }
+}
+```
+
+Confirmations require strict booleans (`true` or `false`). Coerced string values
+are rejected.
+
+## Direct brief and production contracts
+
+For video and storybook pipelines (`hyperframes-explainer` and
+`hyperframes-storybook`), work begins with a structured brief and explicit
+permissions.
+
+### Contract helper
+
+The canonical production contract helper validates briefs and creates or updates
+`PROJECT_DIR/production-contract.json`:
+
+```sh
+# Inside worker container:
+node /opt/omp-skills/omp-video-pipeline/scripts/production-contract.mjs <absolute PROJECT_DIR> --input <absolute brief.json> [--update]
+
+# Or from host / source checkout:
+node omp-skills/omp-video-pipeline/scripts/production-contract.mjs <absolute PROJECT_DIR> --input <absolute brief.json> [--update]
+```
+
+### Input brief format
+
+```json
+{
+  "pipeline": "hyperframes-storybook",
+  "spec": {
+    "style": "storybook-flat",
+    "format": "landscape",
+    "voice": "am_michael",
+    "audience": "families",
+    "tone": "warm, gentle, character-led",
+    "narrationMode": "verbatim",
+    "music": "required"
+  },
+  "durationSec": 15,
+  "brief": "A traveler encounters a mysterious cottage in a quiet forest.",
+  "permissions": {
+    "createAssets": true,
+    "generateAudio": false,
+    "renderVideo": false
+  }
+}
+```
+
+### Brief schema and configuration fields
+
+| Field | Type | Description |
+|---|---|---|
+| `pipeline` | string | Required: `"hyperframes-storybook"` or `"hyperframes-explainer"`. |
+| `spec.format` | string | Optional: `"landscape"` (1920x1080), `"portrait"` (1080x1920), or `"square"` (1080x1080). Default: `"landscape"`. |
+| `spec.style` | string | Optional: `"storybook-flat"` for storybook; non-empty string for explainer (default `"auto"`). |
+| `spec.voice` | string | Optional Kokoro English voice (e.g. `"am_michael"`, `"af_heart"`). Default: `"am_michael"`. |
+| `spec.audience` | string | Optional target audience description (≤200 characters). Default storybook: `"families"`, explainer: `"developers"`. |
+| `spec.tone` | string | Optional tone guidance (≤200 characters). Default storybook: `"warm, gentle, character-led"`, explainer: `"clear, friendly, technical"`. |
+| `spec.narrationMode` | string | Optional: `"verbatim"` or `"restructured"`. Default storybook: `"verbatim"`, explainer: `"restructured"`. |
+| `spec.music` | string | Optional: `"required"` or `"none"`. Default storybook: `"required"`, explainer: `"none"`. |
+| `durationSec` | number | Required: positive finite number. |
+| `brief` | string | Required: non-empty brief prompt describing narrative and visuals. |
+| `permissions` | object | Required booleans: `createAssets`, `generateAudio`, `renderVideo`. |
+
+### Contract enforcement and safety boundaries
+
+- **Permissions:** `{createAssets: boolean, generateAudio: boolean, renderVideo: boolean}`
+  strictly govern pipeline execution.
+- **Overwrite protection:** The helper refuses to overwrite an existing contract
+  unless `--update` is explicitly provided.
+- **Preservation on update:** Explicit new values in the brief input win.
+  Otherwise, existing fields are preserved: `revisionInstructions` (default `""`),
+  `changedFrames` (default `[]`), `approvalNotes` (default `""`), and
+  `narrationSource` (explicit new wins, otherwise existing preserved, otherwise
+  captures from `SCRIPT.md` if verbatim). Unchanged approved narration baselines
+  are retained rather than regenerated.
+- **Skills compliance:** Internal skills must honor these permissions. If a
+  pipeline reaches a stage requiring ungranted permissions (e.g., rendering video
+  when `renderVideo: false`), it stops and requests permission from Hermes/user.
+- **Not a security sandbox:** The helper is an orchestration checkpoint, not an
+  isolated security sandbox, durable job machine, or billing watcher.
+
+## Artifacts and acceptance validation
+
+### Artifact publishing
+
+Artifact publishing is **manual by the worker task/OMP**, not an automatic
+daemon copy. When a project is rendered or previewed:
+
+1. The worker task copies the complete project directory, **including the hidden
+   `.hyperframes/` directory**, to:
+   ```text
+   $OMP_EXECUTOR_ARTIFACT_ROOT = /data/executor/artifacts/<project-name>/
+   ```
+2. Machine acceptance validation is run directly on the published copy:
+   ```sh
+   node /opt/omp-skills/omp-storybook-pipeline/scripts/acceptance.mjs /data/executor/artifacts/<project-name> [--require-video]
+   ```
+   *(Preview runs omit `--require-video`).*
+3. The task returns the exact bound video path from the published directory.
+
+Hermes mounts this artifact tree read-only at:
+
+```text
+/artifacts/<project-name>/
+```
+
+### Storybook acceptance validation
+
+Machine acceptance requires:
+1. Valid storybook manifest (`storybook.json`) and source contracts.
+2. Verified character and recurring background images.
+3. Audio alignment, narration timing, and caption cue coverage.
+4. Frame alignment and motion bounds across all shots.
+5. Presence of a truthful `visual-review.json` recorded after actual inspection
+   of real video and screenshot evidence by an operator or reviewing agent.
+
+Fabricating approval files without inspecting real evidence is strictly prohibited.
+## Resource limits and boundaries
+
+- **Native limits:** OMP executes commands within its native context. Model
+  quotas, context windows, and rate limits are reported directly by OMP and the
+  model provider.
+- **No durable scheduler:** Disconnecting or stopping containers terminates
+  in-flight execution processes. Session history remains intact, allowing exact
+  resumption once the stack is restarted.
+- **No automatic paid replay:** The plugin and transport never resubmit failed
+  or interrupted tasks. Hermes evaluates the failure and obtains authorization
+  before further paid work. Native in-turn retry behavior is controlled by OMP
+  settings (`set_auto_retry`), not by a bridge scheduler.
+- **Provider authentication:** OAuth providers requiring browser callbacks must
+  be authenticated via `dc exec omp-executor omp login <provider>`.

@@ -1,167 +1,208 @@
 ---
 name: omp-video
-description: Make a narrated technical explainer or storybook video (MP4) by handing the job to the separate omp video worker. Use when the user asks for an explainer, concept, tutorial, or real storybook animation, or a revision of one.
-version: 2.1.0
+description: Make a narrated technical explainer or storybook video (MP4) by orchestrating the direct OMP video worker via authenticated RPC.
+version: 0.3.0
 platforms: [linux]
-prerequisites:
-  commands: [curl]
 metadata:
   hermes:
-    tags: [creative, video, explainer, storybook, hyperframes, delegation]
+    tags: [creative, video, explainer, storybook, hyperframes, rpc]
     category: creative
-    requires_toolsets: [terminal]
+    requires_toolsets: [omp-executor]
 ---
 
 # omp-video
 
-Delegate production to the separate omp worker via `/v1`; never run HyperFrames here.
-Choose the pipeline from the user's explicit intent, save IDs, report progress,
-and deliver media. Ask only when the target or requested change is ambiguous.
-Never promise a fixed completion time.
+Orchestrate video production on the isolated OMP worker via direct authenticated TCP RPC. Never make HTTP bridge calls (`/v1/...`), run HyperFrames locally on the host, or author production video files directly from Hermes.
 
-## Connection and files
+Hermes orchestrates permissions, brief validation, session selection, checkpoints, acceptance verification, and user delivery.
+Inside the worker:
+- **OMP Main**: Executes the overall pipeline, synthesizes shared audio, coordinates visual review, and renders final video.
+- **Frame Subagents**: Author individual frame HTML and visual compositions.
+- **Asset Subagents**: Create and source static illustration assets.
 
-- Use `$OMP_BRIDGE_URL`, `$OMP_BRIDGE_TOKEN`, and `H="Authorization: Bearer $OMP_BRIDGE_TOKEN"`. Never print the token, export it into command output, enable shell tracing, or guess ports.
-- Errors: `{"error":{"code","message"}}`; report both. Never automatically retry paid work.
-- `/videos-v2/` is read-only. Webhook paths already use it. For API paths, replace the exact `$OMP_BRIDGE_DATA_DIR/` prefix with `/videos-v2/` (Compose: `/data/worker`; unset: existing host prefix `/home/thangnc/general/omp-videos-v2`).
-- Imported `/home/thangnc/general/omp-videos/` paths map to `/videos/` and require the legacy mount.
-- `metadata` is opaque caller data only. Never read, import, or treat `metadata.localProjectDir` (or any metadata path) as a file transfer. Upload real files through the authenticated assets endpoint and use API-returned artifact paths only after verifying their mount prefix and containment.
+---
 
-## Submit
+## 1. Toolset & Connection Architecture
 
-Choose the pipeline from the user's intent; do not infer it from a keyword or
-regular expression in the brief:
-- Technical explainer/tutorial: `pipeline: "hyperframes-explainer"`.
-- Storybook animation: `pipeline: "hyperframes-storybook"`.
-Fetch `GET /v1/catalog` and select by the exact `.pipeline` ID. Never use
-`pipelines[0]`; array order is not a contract. Reject an unavailable ID rather
-than silently packaging a storybook into the explainer pipeline.
+All operations use the 6 native tools from the `omp-executor` toolset:
+`omp_sessions`, `omp_open`, `omp_rpc`, `omp_events`, `omp_respond`, `omp_close`.
 
-Pick settings from the audience/platform and briefly state the choice:
-- Explainer style comes from the selected pipeline's catalog; common choices are
-  `code-editorial`, `editorial-forest`, `blue-professional`, or `auto`.
-- Storybook profile: use `style: "storybook-flat"` (the supported style), put the user's story and beats in `topic`/`brief` without rewriting them, default `narrationMode: "verbatim"` and `music: "required"`, and use `music: "none"` only when requested. `format`, `voice`, `audience`, and `tone` remain explicit profile fields.
-- Format: `landscape` (default), `portrait` for Shorts/Reels, `square` for feeds.
-- Voice: English only; default `am_michael`. Say Vietnamese narration is unsupported.
-- Duration: default 50s; ~30s for Shorts, 45–75s for concepts, up to 180s for tutorials. Add short `audience` and `tone` phrases.
+No HTTP bridge, curl calls, or webhook daemons exist. Communication is strictly internal authenticated TCP RPC.
 
-Storybook capability is intentionally bounded to readable flat 2D storybook
-artwork and sparse whole-image motion: choose or create complete character
-images and recurring background images first, inspect a still establishing frame,
-then use restrained whole-character slides and slight tilts only across measured
-VO/word spans, returning to neutral when each utterance ends. Do not rock through
-silent padded time. Reuse the same files in every shot. Supplied or authorized
-artwork is preferred; do not assume paid generation, use fake placeholders, or
-require programmatic primitive drawing. It is not generated cinematography,
-photoreal live action, or arbitrary 3D camera work. Describe that limitation
-before submission when it affects the user's expectation.
+---
 
-Build payloads with `json.dumps`, never concatenate user text into JSON:
+## 2. Pipeline Selection & Constraints
+
+Select the pipeline from the user's explicit intent; do not guess from keywords:
+
+1. **Technical Explainer / Tutorial**:
+   - Internal Pipeline ID: `hyperframes-explainer`
+   - Internal Skill: `omp-video-pipeline`
+   - Styles: `code-editorial`, `editorial-forest`, `blue-professional`, `auto`.
+   - Formats: `landscape` (1920x1080 default), `portrait` (1080x1920), `square` (1080x1080).
+   - Voice: English only (default `am_michael`).
+   - Duration: 45–75s for concepts, up to 180s for tutorials, ~30s for Shorts.
+
+2. **Storybook Animation**:
+   - Internal Pipeline ID: `hyperframes-storybook`
+   - Internal Skill: `omp-storybook-pipeline`
+   - Style: `storybook-flat` (supported flat 2D style).
+   - Narration mode: `verbatim` (exact user text) or `restructured`.
+   - Music: `required` (default) or `none`.
+   - **Capability Bounds**: Flat 2D storybook artwork with sparse, restrained whole-image motion across measured voiceover spans. Recurring characters and background images are reused across shots. Characters return to neutral rest states when utterances end; no continuous rocking during silence. Storybook is not 3D cinematography, live action, or continuous camera motion.
+
+---
+
+## 3. Validated Direct Brief & Production Contract Helper
+
+Video generation requires a valid `production-contract.json` created in the worker project directory using the canonical helper:
 ```bash
-python3 - <<'PY' > /tmp/job.json
-import json
-print(json.dumps({
-    "pipeline": "hyperframes-explainer",
-    "topic": "Hash tables", "brief": "Explain collisions and resizing",
-    "durationSec": 45,
-    "spec": {"style": "code-editorial", "format": "landscape", "voice": "am_michael",
-             "audience": "junior devs", "tone": "clear and technical"},
-    "metadata": {"chat": "<copy destination from conversation>"}
-}))
-PY
-curl -s -X POST "$OMP_BRIDGE_URL/v1/videos" -H "$H" \
-  -H "Content-Type: application/json" --data-binary @/tmp/job.json
+node /opt/omp-skills/omp-video-pipeline/scripts/production-contract.mjs <absolute PROJECT_DIR> --input <absolute brief.json> [--update]
 ```
-Save job/scene/version/project IDs. Revisions create new versions; never replace
-a saved job with a fresh submission as recovery. Optional submit limits:
-`"limits":{"maxUsd":5,"maxMinutes":60}`; USD is a soft watcher, not a hard provider cap.
 
-## Follow and control
-
-Webhooks carry submit metadata: `job.started`, `job.awaiting_approval`,
-`job.succeeded`, `job.failed`, `job.rejected`, `job.cancelled`, `job.resumed`.
-If events are missing, poll the same job no more often than every 2 minutes,
-with a finite bound; inspect it later rather than submit a replacement.
-
-| Action | Request / rule |
-|---|---|
-| Inspect | `GET /v1/jobs/<id>?events=1` → job, version, history |
-| Storyboard gate | Submit `"approve":"storyboard"`; on `awaiting_approval`, translate `version.projectDir`, read `STORYBOARD.md` / `SCRIPT.md`, summarize |
-| Approve | Only after user approval: `POST /v1/jobs/<id>/approve {"notes":"changes"}` |
-| Preview | Submit `"render":false`; contact sheets but no MP4, still incurs authoring costs |
-| Native render | After user accepts preview: `POST /v1/versions/<id>/render {}` (no LLM) |
-| Revise | Resolve scene from reply/context or `GET /v1/projects` → `GET /v1/projects/<id>`; ask if ambiguous. `POST /v1/scenes/<id>/revise {"instructions":"Frame 5: ...","frames":[5],"metadata":{"chat":"..."}}` |
-| Revision source/length | Defaults to current version; optional `fromVersionId`, `durationSec` (10–300). Use concrete contact-sheet frame numbers |
-| Roll back | `POST /v1/scenes/<id>/use {"versionId":"..."}` |
-| Cancel | `POST /v1/jobs/<id>/cancel {"reason":"..."}`; `job_finished` means nothing remains to cancel |
-
-Approval waiting has no automatic timeout, but the original `maxMinutes` clock
-includes that wait. Style/format/frame-count changes can be rejected: report
-the reason and offer a new video, never submit it without authorization. If the
-user already authorized production and did not request a storyboard gate, do not
-insert another approval gate merely because the pipeline is storybook.
-
-### Manual resume
-
-Only an explicit user request authorizes continuation. Resolve the exact saved ID
-from conversation/API; ask only if ambiguous. Inspect job/history first:
-- Kinds: `build`, `revise`, `render`, `stitch`; states: `failed`, `cancelled`, `interrupted`. Never bypass `awaiting_approval`.
-- `POST /v1/jobs/<id>/resume {}` retains IDs, workdir/session, phase, approval notes and cumulative USD/tokens; opens a fresh time window. Auto crash recovery stays capped at two and keeps the old clock.
-- Optional `{"limits":{"maxMinutes":20,"maxUsd":8}}`: positive bounds 240 minutes / $50. USD is the **total** budget, not additional spend; get authorization before raising it.
-- Native render/stitch reject USD overrides and have no native time watcher. Stitch resumes against the **current** timeline.
-- The API checks references, artifacts/session/accounting history, stale versions and busy conflicts. On error, report code/message; no state repair, retry or new-job fallback. Preserve workdirs/usage logs; never edit them while the worker is live.
-- `200 {job}` retains the ID and records `manual_resume` / `job.resumed`. A webhook, timeout or missing response never authorizes approval, another resume, or a new submission.
-
-## Deliver
-
-On success, use `job.result` and translate API paths. Send MP4 (if present) **and**
-contact sheets, plus duration and reported USD. Native render omits sheets:
-`GET /v1/versions/<versionId>` → `outputs.contactSheets`; stitch returns the final MP4.
-Include scene/version IDs in captions for later revisions. On failure, report
-error; logs are `version.workdir/{omp.jsonl,omp.stderr.log}`.
-
-For a storybook job, `succeeded` is necessary but not sufficient for delivery.
-Before claiming acceptance, inspect the project-root `acceptance.json` through the
-verified `/data/worker` → `/videos-v2` mapping and require it to be current and
-valid. Also inspect `.hyperframes/storybook-audit.json` and
-`.hyperframes/storybook-audit/contact.json`, then inspect the single required
-`.hyperframes/storybook-audit/visual-review.json`. It must have
-`kind:"hyperframes-storybook-visual-review"`, `verdict:"approved"`, a
-`sourceDigest` matching the current audit evidence digest, only evidence files
-emitted by that audit, and one substantive observation for every internal shot
-(style, continuity, acting, captions). The contact report remains
-`review-required`: report visual review separately because machine acceptance
-cannot certify aesthetic quality. A missing, stale, failed, or unreviewed
-artifact is a delivery issue, not a reason to pretend the job failed or to
-submit a replacement.
-
-Webhook forwarding is text-only. The owner must grant `terminal`, `file`, `skills`
-to this route in `webhook_subscriptions.json`; never self-grant tools.
-Verify readable paths, then use the sender for the configured Telegram home:
-```bash
-/opt/hermes/bin/hermes send --to telegram --json "Scene <id> · version <id>
-MEDIA:/videos-v2/<actual MP4 path>
-MEDIA:/videos-v2/<actual contact sheet path>"
+### Brief Specification (`brief.json`)
+```json
+{
+  "pipeline": "hyperframes-storybook",
+  "spec": {
+    "style": "storybook-flat",
+    "format": "landscape",
+    "voice": "am_michael",
+    "audience": "children",
+    "tone": "gentle",
+    "narrationMode": "verbatim",
+    "music": "required"
+  },
+  "durationSec": 50,
+  "brief": "A curious fox explores an autumn forest.",
+  "permissions": {
+    "createAssets": true,
+    "generateAudio": true,
+    "renderVideo": true
+  }
+}
 ```
-Omit MP4 for previews. Check `success` **and** `warnings`; claim only confirmed
-attachments. Report partial failures without resending the entire bundle.
-Final webhook response summarizes delivery without repeating MEDIA directives.
 
-## Projects and assets
+### Brief Rules & Permissions
+- **Validation**: `pipeline` must be `hyperframes-explainer` or `hyperframes-storybook`. `durationSec` must be positive. `permissions` must contain booleans `{ createAssets, generateAudio, renderVideo }`.
+- **Operational Directives**: Permission flags are operational instructions that pipeline skills honor, not operating system sandboxing or hypervisor isolation.
+- **Contract Updates & Precedence**: Helper refuses to overwrite an existing contract unless `--update` is explicitly passed. On `--update`, explicit brief fields take precedence over existing contract fields (`brief.revisionInstructions` > existing, `brief.changedFrames` > existing, `brief.approvalNotes` > existing).
+- **Narration Precedence**: Explicit input `narrationSource` in brief > existing contract `narrationSource` > `SCRIPT.md` baseline (when `narrationMode: "verbatim"`).
+- **Permissions Enforcement**:
+  - `createAssets`: Authorize static asset generation/sourcing.
+  - `generateAudio`: Authorize voice and music synthesis.
+  - `renderVideo`: Authorize MP4 video rendering.
+  - **No Hidden Renders**: For preview-only jobs, set `renderVideo: false`. If an ungranted permission is required, pause and request user authorization; never assume implicit approval.
 
-Split distinct parts into 30–90s API scenes. A storybook API scene may contain
-multiple internal shots; do not create one API scene per shot or report internal
-shot count as API scene count. Use the same authenticated API:
-- For storybook requests with supplied files, use the project workflow: the
-  one-shot route cannot upload an asset before it creates its scene. Upload every
-  real character/background asset **before** adding/building that scene.
-- `POST /v1/projects {"name":"...","pipeline":"hyperframes-storybook","brief":"...","spec":{...}}`; `GET /v1/projects/<id>` lists scenes/versions/assets/final`.
-- Upload raw bytes: `POST /v1/projects/<id>/assets?name=character.png&tags=character` with `--data-binary @/path/to/character.png` (≤200MB, content-deduplicated); then reference the returned asset ID/name in `assets`. Upload recurring backgrounds the same way with a `background` tag.
-- `POST /v1/projects/<id>/scenes {"topic":"...","durationSec":45,"assets":["character.png","room.webp"],"findAssets":false}`; then `POST /v1/scenes/<id>/build {"metadata":{"chat":"..."}}`.
-- Never use a host path or `metadata.localProjectDir` as an asset reference. Metadata does not transfer files. For storybook, choose supplied/reusable artwork first; set `findAssets:true` only when the user requests authorized asset sourcing, and never substitute fake placeholders.
-- `PUT /v1/projects/<id>/timeline {"order":["scn_a","scn_b"],"transitions":{"scn_b":"fade"}}`; default hard cut, fade up to 0.5s into the named scene.
-- `POST /v1/projects/<id>/stitch {"metadata":{"chat":"..."}}` needs current rendered versions for every timeline scene. Stitch again after revisions to refresh the final.
-- `PATCH /v1/projects/<id>` merges spec fields. Delete via `/v1/projects/<id>`, `/v1/scenes/<id>`, `/v1/projects/<id>/assets/<assetId>`; conflicting active work blocks deletion.
-- For technical explainers, upload user files and select them in `assets`. Set `findAssets:true` only for requested/needed real-world imagery (credits recorded); otherwise follow the explainer skill's visual rules.
+---
 
-Jobs queue according to configured concurrency; do not promise sequential timings.
+## 4. Production Execution Workflow via RPC
+
+1. **Session Setup (`omp_open`)**:
+   Inspect existing sessions with `omp_sessions`.
+   For new projects, launch without `cwd` to use the default worker workspace:
+   ```json
+   {
+     "executor": "video-worker",
+     "mode": "new"
+   }
+   ```
+   Determine the worker workspace directory by running `pwd` via the `bash` command in `omp_rpc` (or inspecting `cwd` in `omp_sessions` catalog).
+   Create the project directory under that workspace:
+   ```json
+   {
+     "executor": "video-worker",
+     "command": "bash",
+     "params": {
+       "command": "mkdir -p <workspace>/projects/<project_slug>"
+     }
+   }
+   ```
+   Set `PROJECT_DIR="<workspace>/projects/<project_slug>"`.
+   For revisions, reconnect to the exact recorded session with `omp_open({ "executor": "video-worker", "mode": "resume", "session_id": "<id>" })`.
+
+2. **Establish Production Contract**:
+   Write `brief.json` in `<PROJECT_DIR>`, then execute the helper via `omp_rpc`:
+   ```json
+   {
+     "executor": "video-worker",
+     "command": "bash",
+     "params": {
+       "command": "node /opt/omp-skills/omp-video-pipeline/scripts/production-contract.mjs <PROJECT_DIR> --input <PROJECT_DIR>/brief.json"
+     }
+   }
+   ```
+
+3. **Prompt Pipeline Execution**:
+   Dispatch prompt using the exact skill URI and absolute contract path:
+   ```json
+   {
+     "executor": "video-worker",
+     "command": "prompt",
+     "params": {
+       "message": "skill://omp-storybook-pipeline <PROJECT_DIR>/production-contract.json",
+       "streamingBehavior": "steer"
+     }
+   }
+   ```
+   (For explainers, use `skill://omp-video-pipeline <PROJECT_DIR>/production-contract.json`).
+
+4. **Sequenced Event Loop & Settlement**:
+   Poll `omp_events({ "executor": "video-worker", "after": cursor, "limit": 100 })`.
+   - Update cursor to `next_cursor`.
+   - Handle interactive UI requests in `pending_requests` via `omp_respond`.
+   - Loop until `turn_active == false` and `session_settled == true`.
+
+---
+
+## 5. Checkpoints & Targeted Revisions
+
+Revisions execute directly within the exact resumed project directory (no copy-on-revise workdir):
+1. Resume session with `omp_open({ "executor": "video-worker", "mode": "resume", "session_id": "<session_id>" })`.
+2. Update contract in place using `--update` and updated brief specifying `revisionInstructions` and `changedFrames: [3, 5]`.
+3. Unchanged frames and approved baseline narration are preserved; only targeted frames are regenerated.
+4. Dispatch revision prompt with exact skill URI and monitor to settlement.
+
+---
+
+## 6. Artifact Publication Procedure & Acceptance
+
+The server does NOT automatically publish artifacts. OMP must publish deliverables explicitly:
+
+1. **Clean Publication Destination**:
+   Pick a fresh explicit publication directory per accepted revision (e.g. `/data/executor/artifacts/<project_slug>`) to prevent nesting stale projects; refuse overwriting unrelated existing directories.
+   Create directory and copy exact contents (including hidden `.hyperframes/` audit/evidence, `production-contract.json`, contact sheets, renders):
+   ```bash
+   mkdir -p /data/executor/artifacts/<project_slug> && cp -a <PROJECT_DIR>/. /data/executor/artifacts/<project_slug>/
+   ```
+
+2. **Rerun Validator on Published Copy**:
+   - **Storybook (`hyperframes-storybook`)**:
+     Run acceptance CLI directly on the published directory:
+     ```bash
+     node /opt/omp-skills/omp-storybook-pipeline/scripts/acceptance.mjs /data/executor/artifacts/<project_slug> [--require-video]
+     ```
+     Pass `--require-video` as a boolean flag for full video jobs; omit it for preview-only runs (`renderVideo: false`).
+     Acceptance CLI must exit with status 0. Read `.hyperframes/storybook-audit.json` to extract `video.path` (typically `renders/video.mp4`), and assert the returned video path binds to that exact audited artifact (`/data/executor/artifacts/<project_slug>/renders/video.mp4`).
+     Verify `.hyperframes/storybook-audit/visual-review.json` has `kind: "hyperframes-storybook-visual-review"`, `verdict: "approved"`, and matches audit digest.
+   - **Explainer (`hyperframes-explainer`)**:
+     Do NOT run storybook acceptance. Rerun explainer verify CLI on the published copy:
+     ```bash
+     node /opt/omp-skills/omp-video-pipeline/scripts/verify.mjs /data/executor/artifacts/<project_slug>
+     ```
+     Verify with `ffprobe` that the bound MP4 matches expected format (dimensions, duration, audio/video streams) and inspect contact sheets.
+
+---
+
+## 7. Delivery & Reporting
+
+Hermes reads published deliverables from `/artifacts/<project_slug>/` (read-only bind mount):
+- Report duration, format, audited video path (`/artifacts/<project_slug>/renders/video.mp4`), contact sheets, and audit/review findings.
+- **No Automatic Telegram Sends**: Deliver media paths directly in conversation. Do not trigger host-level Telegram broadcasts without authorization.
+- **No Fake USD Watchers**: Report actual completion status; do not fabricate USD cost estimations or synthetic timers.
+
+## 8. Platform Limits & Native Protocol Constraints
+
+- **Headless OAuth**: Native RPC cannot accept interactive OAuth flows. Credentials must be preconfigured in the worker environment.
+- **Fixed CWD**: Working directory is fixed at session creation. Revisions must stay in the project workdir or open a fresh session.
+- **Structured RPC vs. TTY**: Native worker `bash` can use a PTY for internal processes, but communication between Hermes and OMP is strictly structured JSON-RPC over TCP.

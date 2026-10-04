@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, it } from "vitest";
 
-const adapter = resolve("src/pipelines/hyperframes-explainer/skills/omp-video-pipeline/scripts/audio.mjs");
+const adapter = resolve("omp-skills/omp-video-pipeline/scripts/audio.mjs");
 const temporary: string[] = [];
 afterEach(() => { for (const dir of temporary.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 const assetEnv = ["KOKORO_MODEL", "KOKORO_MODEL_PATH", "HYPERFRAMES_KOKORO_MODEL", "HYPERFRAMES_TTS_MODEL", "KOKORO_VOICES", "KOKORO_VOICES_PATH", "HYPERFRAMES_KOKORO_VOICES", "HYPERFRAMES_TTS_VOICES"];

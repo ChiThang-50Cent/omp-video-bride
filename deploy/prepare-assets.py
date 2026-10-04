@@ -36,11 +36,18 @@ def download(spec, destination):
         temporary.unlink(missing_ok=True)
 
 
-def runtime_inputs(lock, root):
+def runtime_inputs(lock, root, select=None):
     root.mkdir(parents=True, exist_ok=True)
+    selected_keys = set(select) if select else None
+    if selected_keys is not None:
+        missing = selected_keys - set(lock.get('runtimeInputs', {}).keys())
+        if missing:
+            raise ValueError(f"Selected runtime input(s) {sorted(missing)} not found in lock file")
     with tempfile.TemporaryDirectory(dir=root, prefix='.inputs-') as work:
         work = Path(work)
         for name, spec in lock['runtimeInputs'].items():
+            if selected_keys is not None and name not in selected_keys:
+                continue
             archive = work / name
             download(spec, archive)
             destination = root / spec['destination']
@@ -60,8 +67,7 @@ def runtime_inputs(lock, root):
                     shutil.copytree(source_root / skill, destination / skill, symlinks=True)
             else:
                 shutil.copytree(source_root, destination, symlinks=True)
-    print('Pinned runtime build inputs downloaded and verified.')
-
+    print(f"Pinned runtime build inputs{f' ({sorted(selected_keys)})' if selected_keys else ''} downloaded and verified.")
 
 def fingerprint(assets):
     return hashlib.sha256(json.dumps(assets, sort_keys=True).encode()).hexdigest()
@@ -151,16 +157,23 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--runtime', action='store_true', help='Fetch only runtime image build inputs')
     mode.add_argument('--check', action='store_true', help='Validate assets without network or writes')
+    parser.add_argument('--lock', type=Path, default=None, help='Path to lock file (defaults to runtime-lock.json)')
+    parser.add_argument('--select', action='append', default=[], help='Select specific runtime inputs to fetch')
     parser.add_argument('destination', type=Path)
     args = parser.parse_args()
-    lock = json.loads(LOCK.read_text())
+    lock_path = args.lock if args.lock is not None else LOCK
+    if not lock_path.is_file():
+        fallback = Path(__file__).with_name('media-runtime-lock.json')
+        if fallback.is_file():
+            lock_path = fallback
+        else:
+            raise FileNotFoundError(f"Missing lock file: {lock_path}")
+    lock = json.loads(lock_path.read_text(encoding='utf-8'))
     if args.runtime:
-        runtime_inputs(lock, args.destination)
+        runtime_inputs(lock, args.destination, select=args.select)
     elif args.check:
         check(args.destination, lock['assets'])
     else:
         initialize(args.destination, lock['assets'])
-
-
 if __name__ == '__main__':
     main()

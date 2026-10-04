@@ -15,7 +15,7 @@
     "erasableSyntaxOnly": true
   },
   "include": [
-    "src",
+    "omp-skills",
     "test",
     "tools"
   ]
