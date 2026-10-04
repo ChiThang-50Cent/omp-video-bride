@@ -69,6 +69,25 @@ The public repository is spelled **omp-video-bride** (without the second
 | Hermes runtime base | `deploy/runtime-lock.json` → `versions.hermesSource` | Built from `deploy/hermes/Dockerfile.runtime` |
 | Media dependency base | `deploy/Dockerfile.runtime` | Independent of OMP and Hermes versions |
 
+## Preparing runtime updates
+
+The updater prepares pins; it does not deploy, restart containers, execute
+downloaded code, or call model providers:
+
+```sh
+python3 tools/update-runtime.py check
+python3 tools/update-runtime.py prepare omp --version <exact-release> --repo <candidate-checkout>
+python3 tools/update-runtime.py prepare hermes --ref <exact-tag-or-full-commit> --repo <candidate-checkout>
+```
+
+Use a separate candidate checkout for evaluation. OMP preparation updates the
+binary and Python RPC client together; Hermes preparation updates its immutable
+source archive. Review reported protocol and dependency changes before testing.
+Prepared checksums establish pinned bytes, not runtime compatibility.
+
+See [operations](docs/OPS.md#upgrades-and-image-rebuilds) for build, verification,
+promotion, and rollback boundaries.
+
 ## Verification and testing
 
 Default verification runs in Docker against the current checkout, using the pinned

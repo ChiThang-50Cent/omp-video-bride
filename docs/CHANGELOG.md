@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased - Runtime update preparation
+
+- Add `tools/update-runtime.py check` and isolated `prepare omp --version` /
+  `prepare hermes --ref` workflows. Preparation pins immutable artifacts and
+  reports review requirements; it never deploys or executes downloaded code.
+- Prepare the OMP binary and its matching Python RPC client together, including
+  the upstream SDK source path. Retain unrelated media and SQLite pins.
+- Derive Docker/Compose/release build metadata with `deploy/runtime-pins.py`.
+  Validate coupled SDK versions and the generated media-only lock.
+- Move OMP installation to a separate worker build stage. The media dependency
+  image excludes OMP and retains its cache identity across OMP/Hermes updates.
+- Document isolated candidate verification, explicit digest promotion, and
+  rollback with the corresponding stopped state snapshot. Existing OMP/Hermes
+  versions remain unchanged; production rollout and media verification are not
+  part of update preparation.
+
 ## 0.3.0 - 2026-10-04 (Direct stack clean cutover)
 
 - Execute approved clean cutover to sole direct architecture: Hermes → authenticated

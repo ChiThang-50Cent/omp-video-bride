@@ -134,6 +134,38 @@ directories.
 
 ## Upgrades and image rebuilds
 
+### Prepare a candidate, not a running-container update
+
+`deploy/runtime-lock.json` owns upstream runtime pins. The Python RPC lock is
+prepared together with the OMP binary; do not update either independently.
+The updater never deploys, builds images, invokes downloaded code, or edits
+production state:
+
+```bash
+python3 tools/update-runtime.py check
+python3 tools/update-runtime.py prepare omp --version <exact-release> --repo <candidate-checkout>
+python3 tools/update-runtime.py prepare hermes --ref <exact-tag-or-full-commit> --repo <candidate-checkout>
+```
+
+Use a separate checkout for candidates. Review the output and lock diff, including
+RPC command/schema changes and Hermes dependency changes. Preparation does not
+migrate plugin commands or prove compatibility. GitHub-provided asset digests,
+when available, are checked; a locally calculated checksum alone is not an
+independent publisher signature.
+
+Specify an exact three-component OMP version, such as `18.6.0`; floating
+`latest`, branch names, and ambiguous `18.6` are not preparation targets.
+GitHub API authentication is optional via `GITHUB_TOKEN` or `GH_TOKEN` and is
+sent only to HTTPS `api.github.com`, never artifact/raw hosts. Keep tokens out of
+generated pin env files and logs. API rate-limit failures abort preparation;
+there is no automatic retry or deployment.
+
+Normal replacement errors roll back already-replaced locks. If rollback also
+fails, the error identifies affected files and any preserved recovery snapshots.
+Sequential replacements are not a cross-file power-loss transaction. After an
+interrupted preparation, restore consistent locks or recreate the candidate
+checkout before proceeding; a prepared candidate is never a rollout approval.
+
 Build and verify the candidate before touching the running stack. The media
 dependency base excludes OMP, allowing OMP-only updates to reuse it. OMP updates
 require both the worker image and the Hermes image containing the matching RPC
