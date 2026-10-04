@@ -50,7 +50,7 @@ jobs:
           python3 deploy/runtime-pins.py --format env >> "$GITHUB_ENV"
       - name: Runtime dependency image
         id: runtime
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: deploy/Dockerfile.runtime
@@ -64,7 +64,7 @@ jobs:
           sbom: true
       - name: Hermes runtime base image
         id: hermes-runtime
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: deploy/hermes/Dockerfile.runtime
@@ -81,7 +81,7 @@ jobs:
           sbom: true
       - name: Build worker image for test
         id: worker-test
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: deploy/Dockerfile.worker
@@ -93,7 +93,7 @@ jobs:
           sbom: false
       - name: Build Hermes image for test
         id: hermes-test
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: deploy/hermes/Dockerfile
@@ -111,7 +111,7 @@ jobs:
           python3 tools/smoke-executor.py --docker --no-build
       - name: Publish verified worker image
         id: worker-publish
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: deploy/Dockerfile.worker
@@ -123,7 +123,7 @@ jobs:
           sbom: true
       - name: Publish verified Hermes image
         id: hermes-publish
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: deploy/hermes/Dockerfile
